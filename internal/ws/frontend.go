@@ -16,13 +16,13 @@ type FrontendServer struct {
 	llm      *handler.LLMHandler
 }
 
-func NewFrontendServer() *FrontendServer {
+func NewFrontendServer(llm *handler.LLMHandler) *FrontendServer {
 	return &FrontendServer{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true }, // shane: 允许跨域
 		}, // http的升级
 		clients: make(map[*websocket.Conn]bool),
-		//llm:     llm,
+		llm:     llm,
 	}
 }
 
@@ -94,7 +94,15 @@ func (s *FrontendServer) SendMessages(conn *websocket.Conn, msg []byte) {
 		log.Println("Connection is nil, waiting for connection")
 		return
 	}
-	if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-		log.Println("Sending message failed:", err)
+
+	// shane: 发送LLM处理后的消息到前端
+	response, _, err := s.llm.Query("qwen-turbo", string(msg))
+	if err != nil {
+		log.Println("LLM query failed:", err)
+		return
+	}
+	// shane: 发送回复到前端
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(response)); err != nil {
+		log.Println("sendMessage failed:", err)
 	}
 }

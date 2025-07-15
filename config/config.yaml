@@ -1,0 +1,5 @@
+openai:
+  api_key: "sk-0cea2b4306694a7d96ddeee439f02401"
+  model: "qwen-turbo"
+  url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  system_prompt: "You are a helpful assistant for a my health system."

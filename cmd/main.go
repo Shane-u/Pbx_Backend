@@ -1,15 +1,36 @@
 package main
 
 import (
+	"context"
 	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
 	"log"
+	"pbx_back_end/internal/handler"
 	"pbx_back_end/internal/ws"
 )
 
 func main() {
+	// TODO:shane: 加载配置文件
+	// shane: 硬编码
+	llmConfig := struct {
+		apiKey       string
+		model        string
+		url          string
+		systemPrompt string
+	}{
+		apiKey:       "sk-0cea2b4306694a7d96ddeee439f02401",
+		model:        "qwen-turbo",
+		url:          "https://dashscope.aliyuncs.com/compatible-mode/v1",
+		systemPrompt: "You are a helpful assistant for a my health system.",
+	}
+	// shane: 初始化LLM处理器
+	ctx := context.Background()
+	logger := logrus.New()
+	llm := handler.NewLLMHandler(ctx, llmConfig.apiKey, llmConfig.url, llmConfig.systemPrompt, logger)
+
 	r := gin.Default()
 	// shane: 前端建立连接
-	frontendServer := ws.NewFrontendServer()
+	frontendServer := ws.NewFrontendServer(llm)
 	frontendServer.Start(r, "8080")
 	// shane: 后端建立连接
 	backendServer := ws.NewBackendServer("ws://175.27.250.177:8080")
@@ -19,20 +40,6 @@ func main() {
 	} else {
 		log.Println("Connected to backend successfully!")
 	}
-	//// shane: 从前端获取消息并发送到后端
-	//go func() {
-	//	for message := range frontendServer.GetMessageChan() {
-	//		log.Printf("从前端收到消息: %s", string(message))
-	//		backendServer.SendMessage(message)
-	//	}
-	//}()
-
-	// shane: 处理从后端接收的消息
-	//go func() {
-	//	for message := range backendClient.GetReceiveChan() {
-	//		log.Printf("从后端收到消息: %s", string(message))
-	//	}
-	//}()
 
 	// shane: keep alive
 	select {}

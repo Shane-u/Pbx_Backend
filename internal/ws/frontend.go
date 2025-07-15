@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
@@ -22,11 +23,18 @@ func NewFrontendServer() *FrontendServer {
 	}
 }
 
-// shane: 启动HTTP服务，提供WebSocket升级
-func (s *FrontendServer) Start(port string) {
-	http.HandleFunc("/ws", s.handleWebSocket) // shane: 第一个参数相当于是句柄，如果遇到这个句柄就会调用连接函数
-	log.Printf("连接成功！")
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+// Start shane: http 升级为 websocket
+func (s *FrontendServer) Start(r *gin.Engine, port string) {
+	// shane: 使用gin处理WebSocket连接
+	r.GET("/ws", func(c *gin.Context) {
+		s.handleWebSocket(c.Writer, c.Request) // shane: http请求升级为WebSocket连接
+	})
+	go func() {
+		if err := r.Run(":" + port); err != nil {
+			log.Println("Connection failed:", err)
+		}
+	}() // shane: 开协程防止阻塞
+	log.Printf("Connected to the front end! Serve on %s", port)
 }
 
 // shane: 处理前端WebSocket连接
@@ -36,20 +44,43 @@ func (s *FrontendServer) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		log.Println("升级连接失败:", err)
 		return
 	}
-	defer conn.Close()
+	defer func() {
+		conn.Close()
+		delete(s.clients, conn)
+		log.Println("WebSocket Connection closed")
+	}()
 	s.clients[conn] = true // shane: 设置已经连接（状态信息）
+	s.conn = conn          // shane: 一定要记住保存连接，后面需要用到
+
+	done := make(chan struct{})
+	go s.ReceiveMessages(conn, done) // shane: 启动接收消息的协程
+	// shane: 阻塞当前函数
+	<-done
 }
 
-func (s *FrontendServer) GetMessageChan() []byte {
+// ReceiveMessages shane: 接收前端发送的消息,没有返回值
+func (s *FrontendServer) ReceiveMessages(conn *websocket.Conn, done chan struct{}) {
+	// TODO: 设计读超时
+
 	// shane: 接收前端发送的消息
 	for {
-		_, msg, err := s.conn.ReadMessage()
+		if conn == nil {
+			log.Println("Connection is nil, waiting for connection")
+			break
+		}
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			log.Println("接收消息失败:", err)
+			log.Println("Receive from frontend failed:", err)
 			delete(s.clients, s.conn)
 			break
 		}
-		return msg
+		// shane: 主动关闭连接
+		if string(msg) == "close" {
+			log.Println("Frontend requested to close connection")
+			break
+		}
+		log.Printf("Receive from frontend: %s", string(msg))
 	}
-	return nil
+
+	close(done) // shane: 关闭done通道，通知主协程结束
 }

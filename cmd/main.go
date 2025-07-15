@@ -1,14 +1,16 @@
 package main
 
 import (
+	"github.com/gin-gonic/gin"
 	"log"
 	"pbx_back_end/internal/ws"
 )
 
 func main() {
+	r := gin.Default()
 	// shane: 前端建立连接
 	frontendServer := ws.NewFrontendServer()
-	frontendServer.Start("8080")
+	frontendServer.Start(r, "8080")
 	// shane: 后端建立连接
 	backendServer := ws.NewBackendServer("ws://175.27.250.177:8080")
 	_, err := backendServer.Connect("webrtc")

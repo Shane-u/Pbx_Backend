@@ -5,6 +5,7 @@ import (
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
+	"pbx_back_end/internal/handler"
 )
 
 // FrontendServer 管理前端WebSocket连接
@@ -12,6 +13,7 @@ type FrontendServer struct {
 	upgrader websocket.Upgrader
 	clients  map[*websocket.Conn]bool
 	conn     *websocket.Conn
+	llm      *handler.LLMHandler
 }
 
 func NewFrontendServer() *FrontendServer {
@@ -20,6 +22,7 @@ func NewFrontendServer() *FrontendServer {
 			CheckOrigin: func(r *http.Request) bool { return true }, // shane: 允许跨域
 		}, // http的升级
 		clients: make(map[*websocket.Conn]bool),
+		//llm:     llm,
 	}
 }
 
@@ -80,7 +83,18 @@ func (s *FrontendServer) ReceiveMessages(conn *websocket.Conn, done chan struct{
 			break
 		}
 		log.Printf("Receive from frontend: %s", string(msg))
+		s.SendMessages(conn, msg) // shane: 接收到消息之后发送消息
 	}
 
 	close(done) // shane: 关闭done通道，通知主协程结束
+}
+
+func (s *FrontendServer) SendMessages(conn *websocket.Conn, msg []byte) {
+	if conn == nil {
+		log.Println("Connection is nil, waiting for connection")
+		return
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+		log.Println("Sending message failed:", err)
+	}
 }

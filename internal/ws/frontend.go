@@ -2,12 +2,15 @@ package ws
 
 import (
 	"encoding/json"
-	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 	"pbx_back_end"
 	"pbx_back_end/internal/handler"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"github.com/shenjinti/go711"
+	"github.com/shenjinti/go722"
 )
 
 // FrontendServer 管理前端WebSocket连接
@@ -15,12 +18,15 @@ type FrontendServer struct {
 	upgrader     websocket.Upgrader
 	clients      map[*websocket.Conn]bool
 	conn         *websocket.Conn
-	RealTimeConn *websocket.Conn // shane: 新增实时连接通道
+	RealTimeConn *websocket.Conn
 	llm          *handler.LLMHandler
 	backendConn  *websocket.Conn // shane: 与后端的连接
+	codec        string          // shane: codec for audio stream
+	asrOption    *pbx_back_end.ASROption
+	ttsOption    *pbx_back_end.TTSOption
 }
 
-func NewFrontendServer(llm *handler.LLMHandler, backendConn *websocket.Conn) *FrontendServer {
+func NewFrontendServer(llm *handler.LLMHandler, backendConn *websocket.Conn, codec string, asrOption *pbx_back_end.ASROption, ttsOption *pbx_back_end.TTSOption) *FrontendServer {
 	return &FrontendServer{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true }, // shane: 允许跨域
@@ -28,6 +34,9 @@ func NewFrontendServer(llm *handler.LLMHandler, backendConn *websocket.Conn) *Fr
 		clients:     make(map[*websocket.Conn]bool),
 		llm:         llm,
 		backendConn: backendConn,
+		codec:       codec,
+		asrOption:   asrOption,
+		ttsOption:   ttsOption,
 	}
 }
 
@@ -112,17 +121,19 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 				// shane: handle audio stram
 				log.Println("Received audio stream from frontend")
 				// log.Println(msg) // shane: 打印音频数据
+				// shane: 转换音频格式
+				convertedAudio, err := s.convertAudio(msg)
+				if err != nil {
+					log.Println("Convert audio format failed:", err)
+					continue
+				}
+
 				// shane: forward audio stream to rust backend
-				if err := s.backendConn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+				if err := s.backendConn.WriteMessage(websocket.BinaryMessage, convertedAudio); err != nil {
 					log.Println("Forward audio stream to rust backend err:", err)
 				} else {
 					log.Println("Forwarded audio stream to rust backend successfully")
 				}
-				message, _, err := s.backendConn.ReadMessage()
-				if err != nil {
-					return
-				}
-				log.Println("rust return:" + string(message))
 			} else {
 				// shane: parse message
 				var frontendEvent struct {
@@ -145,6 +156,7 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 							Offer:  frontendEvent.Sdp,
 							Caller: "frontend",
 							Callee: "rust",
+							ASR:    s.asrOption,
 						},
 					}
 
@@ -155,6 +167,8 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 					}
 					if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
 						log.Println("forward invite command to rust backend err:", err)
+					} else {
+						log.Println("Forwarded invite command with ASR config to rust backend")
 					}
 				}
 
@@ -193,6 +207,17 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 		close(done)
 	}()
 	<-done
+}
+
+// convertAudio shane: parse audio data and convert to g722 or pcmu
+func (s *FrontendServer) convertAudio(audioData []byte) ([]byte, error) {
+	if s.codec == "g722" {
+		encoder := go722.NewG722Encoder(go722.Rate64000, 0)
+		return encoder.Encode(audioData), nil
+	} else if s.codec == "pcmu" {
+		return go711.EncodePCMU(audioData)
+	}
+	return audioData, nil
 }
 
 // ReceiveMessages shane: 接收前端发送的消息,没有返回值
@@ -263,6 +288,59 @@ func (s *FrontendServer) receiveBackendMessages() {
 		}
 		// shane: type down message fron rust backend
 		log.Printf("Received from rust backend (type %d): %s", messageType, string(msg))
+
+		// shane: parse the message
+		var event struct {
+			Event string `json:"event"`
+			Text  string `json:"text"`
+		}
+		if err := json.Unmarshal(msg, &event); err == nil {
+			// shane: handle asrFinal and send ASR result to LLM handler
+			if event.Event == "asrFinal" && event.Text != "" {
+				log.Printf("received ASR response: %s", event.Text)
+
+				// shane: use LLM to handle ASR result
+				if s.llm != nil {
+					log.Printf("handle ASR result via LLM...")
+					response, _, err := s.llm.Query("qwen-turbo", event.Text)
+					if err != nil {
+						log.Println("LLM handle ASR result failed:", err)
+					} else {
+						log.Printf("LLM handle failed: %s", response)
+
+						// shane: send TTS command to Rust backend
+						ttsCmd := pbx_back_end.TtsCommand{
+							Command: "tts",
+							Text:    response,
+							Speaker: s.ttsOption.Speaker,
+							Option:  s.ttsOption,
+						}
+
+						cmdBytes, err := json.Marshal(ttsCmd)
+						if err != nil {
+							log.Println("generate TTS Command failed:", err)
+						} else {
+							if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+								log.Println("send TTS command to Rust backend failed:", err)
+							} else {
+								log.Println("TTS command sent to Rust backend successfully")
+							}
+						}
+					}
+				}
+			} else if event.Event == "asrDelta" {
+				// shane: handle ASR delta event
+				log.Printf("ASR realtime recognize: %s", event.Text)
+			} else if event.Event == "speaking" {
+				log.Printf("detecting speaking")
+			} else if event.Event == "silence" {
+				log.Printf("detecting silence")
+			} else if event.Event == "trackStart" {
+				log.Printf("track started")
+			} else if event.Event == "trackEnd" {
+				log.Printf("track ended")
+			}
+		}
 
 		// shane: forward the message to the frontend
 		s.forwardRustMessageToFrontend(msg)

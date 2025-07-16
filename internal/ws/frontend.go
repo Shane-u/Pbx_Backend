@@ -1,28 +1,33 @@
 package ws
 
 import (
+	"encoding/json"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
+	"pbx_back_end"
 	"pbx_back_end/internal/handler"
 )
 
 // FrontendServer 管理前端WebSocket连接
 type FrontendServer struct {
-	upgrader websocket.Upgrader
-	clients  map[*websocket.Conn]bool
-	conn     *websocket.Conn
-	llm      *handler.LLMHandler
+	upgrader     websocket.Upgrader
+	clients      map[*websocket.Conn]bool
+	conn         *websocket.Conn
+	RealTimeConn *websocket.Conn // shane: 新增实时连接通道
+	llm          *handler.LLMHandler
+	backendConn  *websocket.Conn // shane: 与后端的连接
 }
 
-func NewFrontendServer(llm *handler.LLMHandler) *FrontendServer {
+func NewFrontendServer(llm *handler.LLMHandler, backendConn *websocket.Conn) *FrontendServer {
 	return &FrontendServer{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true }, // shane: 允许跨域
 		}, // http的升级
-		clients: make(map[*websocket.Conn]bool),
-		llm:     llm,
+		clients:     make(map[*websocket.Conn]bool),
+		llm:         llm,
+		backendConn: backendConn,
 	}
 }
 
@@ -32,6 +37,16 @@ func (s *FrontendServer) Start(r *gin.Engine, port string) {
 	r.GET("/ws", func(c *gin.Context) {
 		s.handleWebSocket(c.Writer, c.Request) // shane: http请求升级为WebSocket连接
 	})
+	// shane: 新增路由 /ws2 处理实时语音
+	r.GET("/ws2", func(c *gin.Context) {
+		s.handleWebSocket2(c.Writer, c.Request)
+	})
+
+	// shane: 监听后端消息
+	if s.backendConn != nil {
+		go s.receiveBackendMessages()
+	}
+
 	go func() {
 		if err := r.Run(":" + port); err != nil {
 			log.Println("Connection failed:", err)
@@ -44,7 +59,7 @@ func (s *FrontendServer) Start(r *gin.Engine, port string) {
 func (s *FrontendServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("升级连接失败:", err)
+		log.Println("Upgrade Connection Failed:", err)
 		return
 	}
 	defer func() {
@@ -58,6 +73,108 @@ func (s *FrontendServer) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	done := make(chan struct{})
 	go s.ReceiveMessages(conn, done) // shane: 启动接收消息的协程
 	// shane: 阻塞当前函数
+	<-done
+}
+
+func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request) {
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("Upgrade Connection Failed:", err)
+		return
+	}
+	defer func() {
+		conn.Close()
+		delete(s.clients, conn)
+		log.Println("RealTime WebSocket Connection closed")
+	}()
+	s.clients[conn] = true // shane: 设置已经连接（状态信息）
+	s.RealTimeConn = conn  // shane: 一定要记住保存连接，后面需要用到
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			if conn == nil {
+				log.Println("Connection is nil, waiting for connection")
+				break
+			}
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				log.Println("Receive Frontend Message failed:", err)
+				break
+			}
+			// shane: 主动关闭连接
+			if string(msg) == "close" {
+				log.Println("Frontend requested to close connection")
+				break
+			}
+
+			// shane: parse message
+			var frontendEvent struct {
+				Event     string          `json:"event"`
+				Sdp       string          `json:"sdp"`
+				Candidate json.RawMessage `json:"candidate"`
+			}
+			if err := json.Unmarshal(msg, &frontendEvent); err != nil {
+				log.Println("parse front end message failed:", err)
+				continue
+			}
+
+			// shane: receive offer
+			if frontendEvent.Event == "offer" && frontendEvent.Sdp != "" {
+				log.Printf("receive front end offer message, sdp: %s", frontendEvent.Sdp)
+
+				inviteCmd := pbx_back_end.InviteCommand{
+					Command: "invite",
+					Option: pbx_back_end.CallOption{
+						Offer:  frontendEvent.Sdp,
+						Caller: "frontend",
+						Callee: "rust",
+					},
+				}
+
+				cmdBytes, err := json.Marshal(inviteCmd)
+				if err != nil {
+					log.Println("marshal invite command failed:", err)
+					continue
+				}
+				if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+					log.Println("forward invite command to rust backend err:", err)
+				}
+			}
+
+			// shane: handle candidate
+			if frontendEvent.Event == "candidate" && frontendEvent.Candidate != nil {
+				log.Println("receive front end ice candidate")
+
+				// shane: parse candidate
+				var candidate struct {
+					Candidate     string `json:"candidate"`
+					SdpMid        string `json:"sdpMid"`
+					SdpMLineIndex int    `json:"sdpMLineIndex"`
+				}
+				if err := json.Unmarshal(frontendEvent.Candidate, &candidate); err != nil {
+					log.Println("parse candidate failed:", err)
+					continue
+				}
+
+				candidateCmd := pbx_back_end.CandidateCommand{
+					Command:    "candidate",
+					Candidates: []string{candidate.Candidate},
+				}
+
+				// shane: marshal to json
+				cmdBytes, err := json.Marshal(candidateCmd)
+				if err != nil {
+					log.Println("marshal candidate command failed:", err)
+					continue
+				}
+				if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+					log.Println("forward candidate command to rust backend err:", err)
+				}
+			}
+		}
+		close(done)
+	}()
 	<-done
 }
 
@@ -83,12 +200,14 @@ func (s *FrontendServer) ReceiveMessages(conn *websocket.Conn, done chan struct{
 			break
 		}
 		log.Printf("Receive from frontend: %s", string(msg))
+		// s.handleMessage(msg)
 		s.SendMessages(conn, msg) // shane: 接收到消息之后发送消息
 	}
 
 	close(done) // shane: 关闭done通道，通知主协程结束
 }
 
+// SendMessages shane: 接收到消息之后发送消息
 func (s *FrontendServer) SendMessages(conn *websocket.Conn, msg []byte) {
 	if conn == nil {
 		log.Println("Connection is nil, waiting for connection")
@@ -105,4 +224,29 @@ func (s *FrontendServer) SendMessages(conn *websocket.Conn, msg []byte) {
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(response)); err != nil {
 		log.Println("sendMessage failed:", err)
 	}
+}
+
+// receiveBackendMessages shane: 接收并打印后端发送的消息
+func (s *FrontendServer) receiveBackendMessages() {
+	if s.backendConn == nil {
+		log.Println("Backend connection is nil, cannot receive messages")
+		return
+	}
+	log.Println("Starting to listen for backend messages")
+	for {
+		// shane:读取后端发送的消息
+		messageType, msg, err := s.backendConn.ReadMessage()
+		if err != nil {
+			log.Printf("Error reading from backend: %v", err)
+			// shane: check the connection whether close or not
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("Backend connection closed unexpectedly: %v", err)
+			}
+			break
+		}
+		// shane: type down message fron rust backend
+		log.Printf("Received from rust backend (type %d): %s", messageType, string(msg))
+	}
+
+	log.Println("Stopped listening for backend messages")
 }

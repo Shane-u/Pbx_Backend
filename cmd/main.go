@@ -29,17 +29,17 @@ func main() {
 	llm := handler.NewLLMHandler(ctx, llmConfig.apiKey, llmConfig.url, llmConfig.systemPrompt, logger)
 
 	r := gin.Default()
-	// shane: 前端建立连接
-	frontendServer := ws.NewFrontendServer(llm)
-	frontendServer.Start(r, "8080")
 	// shane: 后端建立连接
 	backendServer := ws.NewBackendServer("ws://175.27.250.177:8080")
-	_, err := backendServer.Connect("webrtc")
+	backendConn, err := backendServer.Connect("webrtc")
 	if err != nil {
 		log.Fatalf("Unable to connect to backend: %v", err)
 	} else {
 		log.Println("Connected to backend successfully!")
 	}
+	// shane: 前端建立连接
+	frontendServer := ws.NewFrontendServer(llm, backendConn)
+	frontendServer.Start(r, "8080")
 
 	// shane: keep alive
 	select {}

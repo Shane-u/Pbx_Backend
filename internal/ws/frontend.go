@@ -97,7 +97,7 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 				log.Println("Connection is nil, waiting for connection")
 				break
 			}
-			_, msg, err := conn.ReadMessage()
+			msgType, msg, err := conn.ReadMessage()
 			if err != nil {
 				log.Println("Receive Frontend Message failed:", err)
 				break
@@ -108,68 +108,85 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 				break
 			}
 
-			// shane: parse message
-			var frontendEvent struct {
-				Event     string          `json:"event"`
-				Sdp       string          `json:"sdp"`
-				Candidate json.RawMessage `json:"candidate"`
-			}
-			if err := json.Unmarshal(msg, &frontendEvent); err != nil {
-				log.Println("parse front end message failed:", err)
-				continue
-			}
-
-			// shane: receive offer
-			if frontendEvent.Event == "offer" && frontendEvent.Sdp != "" {
-				log.Printf("receive front end offer message, sdp: %s", frontendEvent.Sdp)
-
-				inviteCmd := pbx_back_end.InviteCommand{
-					Command: "invite",
-					Option: pbx_back_end.CallOption{
-						Offer:  frontendEvent.Sdp,
-						Caller: "frontend",
-						Callee: "rust",
-					},
+			if msgType == websocket.BinaryMessage {
+				// shane: handle audio stram
+				log.Println("Received audio stream from frontend")
+				// log.Println(msg) // shane: 打印音频数据
+				// shane: forward audio stream to rust backend
+				if err := s.backendConn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+					log.Println("Forward audio stream to rust backend err:", err)
+				} else {
+					log.Println("Forwarded audio stream to rust backend successfully")
 				}
-
-				cmdBytes, err := json.Marshal(inviteCmd)
+				message, _, err := s.backendConn.ReadMessage()
 				if err != nil {
-					log.Println("marshal invite command failed:", err)
-					continue
+					return
 				}
-				if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-					log.Println("forward invite command to rust backend err:", err)
+				log.Println("rust return:" + string(message))
+			} else {
+				// shane: parse message
+				var frontendEvent struct {
+					Event     string          `json:"event"`
+					Sdp       string          `json:"sdp"`
+					Candidate json.RawMessage `json:"candidate"`
 				}
-			}
-
-			// shane: handle candidate
-			if frontendEvent.Event == "candidate" && frontendEvent.Candidate != nil {
-				log.Println("receive front end ice candidate")
-
-				// shane: parse candidate
-				var candidate struct {
-					Candidate     string `json:"candidate"`
-					SdpMid        string `json:"sdpMid"`
-					SdpMLineIndex int    `json:"sdpMLineIndex"`
-				}
-				if err := json.Unmarshal(frontendEvent.Candidate, &candidate); err != nil {
-					log.Println("parse candidate failed:", err)
+				if err := json.Unmarshal(msg, &frontendEvent); err != nil {
+					log.Println("parse front end message failed:", err)
 					continue
 				}
 
-				candidateCmd := pbx_back_end.CandidateCommand{
-					Command:    "candidate",
-					Candidates: []string{candidate.Candidate},
+				// shane: receive offer
+				if frontendEvent.Event == "offer" && frontendEvent.Sdp != "" {
+					log.Printf("receive front end offer message, sdp: %s", frontendEvent.Sdp)
+
+					inviteCmd := pbx_back_end.InviteCommand{
+						Command: "invite",
+						Option: pbx_back_end.CallOption{
+							Offer:  frontendEvent.Sdp,
+							Caller: "frontend",
+							Callee: "rust",
+						},
+					}
+
+					cmdBytes, err := json.Marshal(inviteCmd)
+					if err != nil {
+						log.Println("marshal invite command failed:", err)
+						continue
+					}
+					if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+						log.Println("forward invite command to rust backend err:", err)
+					}
 				}
 
-				// shane: marshal to json
-				cmdBytes, err := json.Marshal(candidateCmd)
-				if err != nil {
-					log.Println("marshal candidate command failed:", err)
-					continue
-				}
-				if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-					log.Println("forward candidate command to rust backend err:", err)
+				// shane: handle candidate
+				if frontendEvent.Event == "candidate" && frontendEvent.Candidate != nil {
+					log.Println("receive front end ice candidate")
+
+					// shane: parse candidate
+					var candidate struct {
+						Candidate     string `json:"candidate"`
+						SdpMid        string `json:"sdpMid"`
+						SdpMLineIndex int    `json:"sdpMLineIndex"`
+					}
+					if err := json.Unmarshal(frontendEvent.Candidate, &candidate); err != nil {
+						log.Println("parse candidate failed:", err)
+						continue
+					}
+
+					candidateCmd := pbx_back_end.CandidateCommand{
+						Command:    "candidate",
+						Candidates: []string{candidate.Candidate},
+					}
+
+					// shane: marshal to json
+					cmdBytes, err := json.Marshal(candidateCmd)
+					if err != nil {
+						log.Println("marshal candidate command failed:", err)
+						continue
+					}
+					if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+						log.Println("forward candidate command to rust backend err:", err)
+					}
 				}
 			}
 		}
@@ -246,7 +263,23 @@ func (s *FrontendServer) receiveBackendMessages() {
 		}
 		// shane: type down message fron rust backend
 		log.Printf("Received from rust backend (type %d): %s", messageType, string(msg))
+
+		// shane: forward the message to the frontend
+		s.forwardRustMessageToFrontend(msg)
 	}
 
 	log.Println("Stopped listening for backend messages")
+}
+
+// forwardRustMessageToFrontend shane: 转发后端消息给前端
+func (s *FrontendServer) forwardRustMessageToFrontend(msg []byte) {
+	if s.RealTimeConn != nil {
+		if err := s.RealTimeConn.WriteMessage(websocket.TextMessage, msg); err != nil {
+			log.Println("Failed to forward backend message to frontend:", err)
+		} else {
+			log.Println("Successfully forwarded backend message to frontend")
+		}
+	} else {
+		log.Println("Frontend connection is nil, cannot forward message")
+	}
 }

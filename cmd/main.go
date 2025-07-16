@@ -23,10 +23,17 @@ func main() {
 		url:          "https://dashscope.aliyuncs.com/compatible-mode/v1",
 		systemPrompt: "You are a helpful assistant for a my health system.",
 	}
-	// shane: 初始化LLM处理器
+	// shane: create LLM handler
 	ctx := context.Background()
 	logger := logrus.New()
 	llm := handler.NewLLMHandler(ctx, llmConfig.apiKey, llmConfig.url, llmConfig.systemPrompt, logger)
+
+	// shane: create media handler
+	mediaHandler, err := handler.NewMediaHandler(ctx, logger)
+	if err != nil {
+		logger.Fatalf("Failed to create media handler: %v", err)
+	}
+	defer mediaHandler.Stop()
 
 	r := gin.Default()
 	// shane: 后端建立连接

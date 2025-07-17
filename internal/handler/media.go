@@ -49,7 +49,7 @@ func NewMediaHandler(ctx context.Context, logger *logrus.Logger) (*MediaHandler,
 		ctx:            ctx,
 		cancel:         cancel,
 		logger:         logger,
-		buffer:         make([]byte, 0, 16000), // Buffer for 1 second of audio at 16kHz
+		buffer:         make([]byte, 0, 16000*5), // Buffer for 1 second of audio at 16kHz
 		sequenceNumber: 0,
 		timestamp:      0,
 		playbackCtx:    playbackCtx,

@@ -157,6 +157,7 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 							Caller: "frontend",
 							Callee: "rust",
 							ASR:    s.asrOption,
+							TTS:    s.ttsOption,
 						},
 					}
 
@@ -166,7 +167,7 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 						continue
 					}
 					if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-						log.Println("forward invite command to rust backend err:", err)
+						log.Printf("forward candidate command to rust backend err: %v, Command data: %s", err, string(cmdBytes))
 					} else {
 						log.Println("Forwarded invite command with ASR config to rust backend")
 					}
@@ -174,7 +175,7 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 
 				// shane: handle candidate
 				if frontendEvent.Event == "candidate" && frontendEvent.Candidate != nil {
-					log.Println("receive front end ice candidate")
+					log.Printf("Received ICE candidate: %s", string(frontendEvent.Candidate)) // shane: 调试
 
 					// shane: parse candidate
 					var candidate struct {
@@ -216,7 +217,12 @@ func (s *FrontendServer) convertAudio(audioData []byte) ([]byte, error) {
 		return encoder.Encode(audioData), nil
 	} else if s.codec == "pcmu" {
 		return go711.EncodePCMU(audioData)
+	} else if s.codec == "pcm" {
+		return audioData, nil
+	} else if s.codec == "wav" {
+		return audioData, nil
 	}
+
 	return audioData, nil
 }
 
@@ -276,6 +282,10 @@ func (s *FrontendServer) receiveBackendMessages() {
 	}
 	log.Println("Starting to listen for backend messages")
 	for {
+		if s.backendConn == nil {
+			log.Println("Backend connection is nil, cannot receive messages")
+			return
+		}
 		// shane:读取后端发送的消息
 		messageType, msg, err := s.backendConn.ReadMessage()
 		if err != nil {
@@ -306,7 +316,17 @@ func (s *FrontendServer) receiveBackendMessages() {
 					if err != nil {
 						log.Println("LLM handle ASR result failed:", err)
 					} else {
-						log.Printf("LLM handle failed: %s", response)
+						log.Printf("LLM response: %s", response)
+						if s.RealTimeConn != nil {
+							if err := s.RealTimeConn.WriteMessage(websocket.TextMessage, []byte(response)); err != nil {
+								log.Printf("Failed to send LLM response to frontend: %v", err)
+								if websocket.IsCloseError(err, websocket.CloseGoingAway) {
+									s.RealTimeConn = nil
+								}
+							}
+						} else {
+							log.Println("RealTime conn is nil, cannot send LLM response")
+						}
 
 						// shane: send TTS command to Rust backend
 						ttsCmd := pbx_back_end.TtsCommand{

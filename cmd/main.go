@@ -77,6 +77,7 @@ type AppConfig struct {
 func main() {
 	// shane: 硬编码
 	endpoint := "ws://175.27.250.177:8080"
+	//endpoint := "ws://localhost:8080"
 	codec := "g722"
 	openaiKey := "sk-0cea2b4306694a7d96ddeee439f02401"
 	openaiModel := "qwen-turbo"
@@ -109,7 +110,7 @@ func main() {
 
 	// shane: init Config
 	config := AppConfig{}
-	config.Server.Port = "8080"
+	config.Server.Port = "8081"
 	config.Backend.URL = endpoint
 	config.Backend.CallType = "webrtc"
 	config.Audio.Codec = codec
@@ -135,7 +136,7 @@ func main() {
 	config.TTS.SecretID = ttsSecretID
 	config.TTS.SecretKey = ttsSecretKey
 	config.TTS.Endpoint = ttsEndpoint
-	config.TTS.Codec = "g722"
+	config.TTS.Codec = "pcm"
 	config.VAD.Model = vadModel
 	config.VAD.Endpoint = vadEndpoint
 	config.VAD.SecretKey = vadSecretKey

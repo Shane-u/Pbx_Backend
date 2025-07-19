@@ -3,6 +3,7 @@
 
 <body>
     <button onclick="connectWebRTC()">建立语音连接</button>
+    <button onclick="hangupCall()" id="hangupButton" disabled>挂断通话</button>
     <div id="log"></div>
     <audio id="audio" autoplay></audio>
 
@@ -21,20 +22,29 @@
                 const message = JSON.parse(event.data);
                 log('Received Messages: ' + JSON.stringify(message));
 
-
                 if (message.event === 'answer') {
                     handleAnswer(message.sdp);
+                    document.getElementById('hangupButton').disabled = false;
                 } else if (message.event === 'candidate') {
                     handleCandidate(message.candidate);
                 } else if (message.event === 'trackStart') {
                     log('Remote media track has started');
-                }else if (message.event === 'asrDelta') {
+                } else if (message.event === 'asrDelta') {
                     log('ASR realtime recognition: ' + message.text);
                 } else if (message.event === 'asrFinal') {
                     log('ASR Final Result: ' + message.text);
                 } else if (message.event === 'llmResponse') {
                     log('AI Response: ' + message.text);
                     document.getElementById('llmResponse').textContent = message.text;
+                } else if (message.event === 'hangup') {
+                    document.getElementById('hangupButton').disabled = true;
+                    // shane: 清理资源
+                    if (peerConnection) {
+                        peerConnection.close();
+                        peerConnection = null;
+                    }
+                    log('Call has been hung up');
+                    isConnected = false;
                 }
             } catch (error) {
                 log('parse message failed: ' + error.message);
@@ -44,6 +54,12 @@
         ws.onclose = function () {
             log('WebSocket Connection closed!');
             isConnected = false;
+            document.getElementById('hangupButton').disabled = true;
+            // shane: clean resources
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
         };
 
         // shane: 错误回调函数
@@ -52,10 +68,10 @@
         };
 
         async function connectWebRTC() {
-            if (isConnected) {
-                log('WebRTC already connected！');
-                return;
-            }
+            // if (isConnected) {
+            //     log('WebRTC already connected！');
+            //     return;
+            // }
 
             log('Start to handle WebRTC Connection');
 
@@ -139,6 +155,23 @@
                 log('had add ICE candidate');
             } catch (error) {
                 log('handle ICE candidate failed: ' + error.message);
+            }
+        }
+
+        // shane: 挂断通话处理函数
+        function hangupCall() {
+            if (isConnected) {
+                const hangupCommand = {
+                    command: "hangup",
+                    reason: "user_requested",
+                    initiator: "caller"
+                };
+                ws.send(JSON.stringify(hangupCommand));
+                log('Hangup command sent');
+                document.getElementById('hangupButton').disabled = true;
+                isConnected = false;
+            } else {
+                log('WebRTC connection is not established.');
             }
         }
 

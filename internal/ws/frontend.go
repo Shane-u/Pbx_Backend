@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"pbx_back_end"
 	"pbx_back_end/internal/handler"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -15,28 +16,30 @@ import (
 
 // FrontendServer 管理前端WebSocket连接
 type FrontendServer struct {
-	upgrader     websocket.Upgrader
-	clients      map[*websocket.Conn]bool
-	conn         *websocket.Conn
-	RealTimeConn *websocket.Conn
-	llm          *handler.LLMHandler
-	backendConn  *websocket.Conn // shane: 与后端的连接
-	codec        string          // shane: codec for audio stream
-	asrOption    *pbx_back_end.ASROption
-	ttsOption    *pbx_back_end.TTSOption
+	upgrader      websocket.Upgrader
+	clients       map[*websocket.Conn]bool
+	conn          *websocket.Conn
+	RealTimeConn  *websocket.Conn
+	llm           *handler.LLMHandler
+	backendConn   *websocket.Conn // shane: 与后端的连接
+	backendServer *BackendServer  // shane: 后端服务实例
+	codec         string          // shane: codec for audio stream
+	asrOption     *pbx_back_end.ASROption
+	ttsOption     *pbx_back_end.TTSOption
 }
 
-func NewFrontendServer(llm *handler.LLMHandler, backendConn *websocket.Conn, codec string, asrOption *pbx_back_end.ASROption, ttsOption *pbx_back_end.TTSOption) *FrontendServer {
+func NewFrontendServer(llm *handler.LLMHandler, backendConn *websocket.Conn, backendServer *BackendServer, codec string, asrOption *pbx_back_end.ASROption, ttsOption *pbx_back_end.TTSOption) *FrontendServer {
 	return &FrontendServer{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true }, // shane: 允许跨域
 		}, // http的升级
-		clients:     make(map[*websocket.Conn]bool),
-		llm:         llm,
-		backendConn: backendConn,
-		codec:       codec,
-		asrOption:   asrOption,
-		ttsOption:   ttsOption,
+		clients:       make(map[*websocket.Conn]bool),
+		llm:           llm,
+		backendConn:   backendConn,
+		backendServer: backendServer,
+		codec:         codec,
+		asrOption:     asrOption,
+		ttsOption:     ttsOption,
 	}
 }
 
@@ -94,6 +97,7 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 	defer func() {
 		conn.Close()
 		delete(s.clients, conn)
+		s.RealTimeConn = nil
 		log.Println("RealTime WebSocket Connection closed")
 	}()
 	s.clients[conn] = true // shane: 设置已经连接（状态信息）
@@ -131,6 +135,17 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 				// shane: forward audio stream to rust backend
 				if err := s.backendConn.WriteMessage(websocket.BinaryMessage, convertedAudio); err != nil {
 					log.Println("Forward audio stream to rust backend err:", err)
+					err := s.backendServer.reconnect("webrtc")
+					if err != nil {
+						return
+					} else {
+						// shane: reforward audio stream to rust backend
+						if err := s.backendConn.WriteMessage(websocket.BinaryMessage, convertedAudio); err != nil {
+							log.Println("Retrying to forward audio stream failed:", err)
+						} else {
+							log.Println("Successfully retried forwarding audio stream to rust backend")
+						}
+					}
 				} else {
 					log.Println("Forwarded audio stream to rust backend successfully")
 				}
@@ -140,6 +155,9 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 					Event     string          `json:"event"`
 					Sdp       string          `json:"sdp"`
 					Candidate json.RawMessage `json:"candidate"`
+					Command   string          `json:"command"`
+					Reason    string          `json:"reason"`
+					Initiator string          `json:"initiator"`
 				}
 				if err := json.Unmarshal(msg, &frontendEvent); err != nil {
 					log.Println("parse front end message failed:", err)
@@ -168,6 +186,24 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 					}
 					if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
 						log.Printf("forward candidate command to rust backend err: %v, Command data: %s", err, string(cmdBytes))
+						if s.backendConn == nil {
+							log.Println("Backend connection is nil, trying to reconnect")
+							err := s.backendServer.reconnect("webrtc")
+							if err != nil {
+								return
+							} else {
+								// shane: 重发invite
+								log.Println("Reconnected to backend successfully, will retry sending invite command")
+								s.backendConn = s.backendServer.Conn
+								if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+									log.Println("Retrying to forward invite command failed:", err)
+								} else {
+									log.Println("Successfully retried forwarding invite command to rust backend")
+								}
+							}
+						} else {
+							log.Println("Failed to forward invite command to rust backend, will retry later")
+						}
 					} else {
 						log.Println("Forwarded invite command with ASR config to rust backend")
 					}
@@ -201,6 +237,51 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 					}
 					if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
 						log.Println("forward candidate command to rust backend err:", err)
+						err := s.backendServer.reconnect("webrtc")
+						if err != nil {
+							return
+						} else {
+							// shane: 重发candidate
+							s.backendConn = s.backendServer.Conn
+							if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+								log.Println("Retrying to forward candidate command failed:", err)
+							} else {
+								log.Println("Successfully retried forwarding candidate command to rust backend")
+							}
+
+						}
+					}
+				}
+
+				// shane: handle hangup event
+				if frontendEvent.Command == "hangup" {
+					hangupCmd := pbx_back_end.HangupCommand{
+						Command:   "hangup",
+						Reason:    frontendEvent.Reason,
+						Initiator: frontendEvent.Initiator,
+					}
+
+					cmdBytes, err := json.Marshal(hangupCmd)
+					if err != nil {
+						log.Println("marshal hangup command failed:", err)
+						continue
+					}
+					if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+						log.Println("forward hangup command to rust backend err:", err)
+						err := s.backendServer.reconnect("webrtc")
+						if err != nil {
+							return
+						} else {
+							// shane: 重发hangup
+							s.backendConn = s.backendServer.Conn
+							if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+								log.Println("Retrying to forward hangup command failed:", err)
+							} else {
+								log.Println("Successfully retried forwarding hangup command to rust backend")
+							}
+						} // shane: 重连后端
+					} else {
+						log.Println("Forwarded hangup command to rust backend")
 					}
 				}
 			}
@@ -276,25 +357,23 @@ func (s *FrontendServer) SendMessages(conn *websocket.Conn, msg []byte) {
 
 // receiveBackendMessages shane: 接收并打印后端发送的消息
 func (s *FrontendServer) receiveBackendMessages() {
-	if s.backendConn == nil {
-		log.Println("Backend connection is nil, cannot receive messages")
-		return
-	}
-	log.Println("Starting to listen for backend messages")
+	callType := "webrtc"
 	for {
 		if s.backendConn == nil {
-			log.Println("Backend connection is nil, cannot receive messages")
-			return
+			// shane: reconnect the backend connection
+			err := s.backendServer.reconnect(callType)
+			if err != nil {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			s.backendConn = s.backendServer.Conn
 		}
-		// shane:读取后端发送的消息
+		// shane: read message from backend
 		messageType, msg, err := s.backendConn.ReadMessage()
 		if err != nil {
-			log.Printf("Error reading from backend: %v", err)
-			// shane: check the connection whether close or not
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Backend connection closed unexpectedly: %v", err)
-			}
-			break
+			// shane: backend connection is closed, set it to nil, and continue the loop
+			s.backendConn = nil
+			continue
 		}
 		// shane: type down message fron rust backend
 		log.Printf("Received from rust backend (type %d): %s", messageType, string(msg))
@@ -366,7 +445,7 @@ func (s *FrontendServer) receiveBackendMessages() {
 		s.forwardRustMessageToFrontend(msg)
 	}
 
-	log.Println("Stopped listening for backend messages")
+	// log.Println("Stopped listening for backend messages") // shane: 自动重连监听
 }
 
 // forwardRustMessageToFrontend shane: 转发后端消息给前端

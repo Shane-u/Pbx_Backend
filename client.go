@@ -271,8 +271,9 @@ type ResumeCommand struct {
 
 // HangupCommand ends the call
 type HangupCommand struct {
-	Command string `json:"command"`
-	Reason  string `json:"reason,omitempty"`
+	Command   string `json:"command"`
+	Reason    string `json:"reason,omitempty"`
+	Initiator string `json:"initiator,omitempty"` // shane: initiator of the hangup, can be "caller" or "callee"
 }
 
 // ReferCommand transfers the call
@@ -331,19 +332,20 @@ type ASROption struct {
 }
 
 type TTSOption struct {
-	Samplerate int32             `json:"samplerate,omitempty" comment:"tts samplerate, 16000|48000"`
-	Provider   string            `json:"provider,omitempty" comment:"tts provider, tencent|aliyun"`
-	Speed      float32           `json:"speed,omitempty"`
-	AppID      string            `json:"appId,omitempty"`
-	SecretID   string            `json:"secretId,omitempty"`
-	SecretKey  string            `json:"secretKey,omitempty"`
-	Volume     int32             `json:"volume,omitempty"`
-	Speaker    string            `json:"speaker,omitempty"`
-	Codec      string            `json:"codec,omitempty"`
-	Subtitle   bool              `json:"subtitle,omitempty"`
-	Emotion    string            `json:"emotion,omitempty"`
-	Endpoint   string            `json:"endpoint,omitempty"`
-	Extra      map[string]string `json:"extra,omitempty"`
+	Samplerate      int32             `json:"samplerate,omitempty" comment:"tts samplerate, 16000|48000"`
+	Provider        string            `json:"provider,omitempty" comment:"tts provider, tencent|aliyun"`
+	Speed           float32           `json:"speed,omitempty"`
+	AppID           string            `json:"appId,omitempty"`
+	SecretID        string            `json:"secretId,omitempty"`
+	SecretKey       string            `json:"secretKey,omitempty"`
+	Volume          int32             `json:"volume,omitempty"`
+	Speaker         string            `json:"speaker,omitempty"`
+	Codec           string            `json:"codec,omitempty"`
+	Subtitle        bool              `json:"subtitle,omitempty"`
+	Emotion         string            `json:"emotion,omitempty"`
+	Endpoint        string            `json:"endpoint,omitempty"`
+	Extra           map[string]string `json:"extra,omitempty"`
+	PrimaryLanguage int32             `json:"primaryLanguage,omitempty"`
 }
 
 type SipOption struct {

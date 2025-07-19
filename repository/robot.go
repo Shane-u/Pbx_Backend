@@ -2,8 +2,13 @@ package repository
 
 type ChatRobot struct {
 	Id          int    `json:"id"`
+	RobotId     int    `json:"robot_id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	Prompt      string `json:"prompt"`
+	VoiceType   string `json:"voice_type"`
+	Volume      int    `json:"volume"`
+	Speed       int    `json:"speed"`
 }
 
 // 注意：以下方法返回原始错误，由路由层处理响应

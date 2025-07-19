@@ -104,190 +104,7 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 	s.RealTimeConn = conn  // shane: 一定要记住保存连接，后面需要用到
 
 	done := make(chan struct{})
-	go func() {
-		for {
-			if conn == nil {
-				log.Println("Connection is nil, waiting for connection")
-				break
-			}
-			msgType, msg, err := conn.ReadMessage()
-			if err != nil {
-				log.Println("Receive Frontend Message failed:", err)
-				break
-			}
-			// shane: 主动关闭连接
-			if string(msg) == "close" {
-				log.Println("Frontend requested to close connection")
-				break
-			}
-
-			if msgType == websocket.BinaryMessage {
-				// shane: handle audio stram
-				log.Println("Received audio stream from frontend")
-				// log.Println(msg) // shane: 打印音频数据
-				// shane: 转换音频格式
-				convertedAudio, err := s.convertAudio(msg)
-				if err != nil {
-					log.Println("Convert audio format failed:", err)
-					continue
-				}
-
-				// shane: forward audio stream to rust backend
-				if err := s.backendConn.WriteMessage(websocket.BinaryMessage, convertedAudio); err != nil {
-					log.Println("Forward audio stream to rust backend err:", err)
-					err := s.backendServer.reconnect("webrtc")
-					if err != nil {
-						return
-					} else {
-						// shane: reforward audio stream to rust backend
-						if err := s.backendConn.WriteMessage(websocket.BinaryMessage, convertedAudio); err != nil {
-							log.Println("Retrying to forward audio stream failed:", err)
-						} else {
-							log.Println("Successfully retried forwarding audio stream to rust backend")
-						}
-					}
-				} else {
-					log.Println("Forwarded audio stream to rust backend successfully")
-				}
-			} else {
-				// shane: parse message
-				var frontendEvent struct {
-					Event     string          `json:"event"`
-					Sdp       string          `json:"sdp"`
-					Candidate json.RawMessage `json:"candidate"`
-					Command   string          `json:"command"`
-					Reason    string          `json:"reason"`
-					Initiator string          `json:"initiator"`
-				}
-				if err := json.Unmarshal(msg, &frontendEvent); err != nil {
-					log.Println("parse front end message failed:", err)
-					continue
-				}
-
-				// shane: receive offer
-				if frontendEvent.Event == "offer" && frontendEvent.Sdp != "" {
-					log.Printf("receive front end offer message, sdp: %s", frontendEvent.Sdp)
-
-					inviteCmd := pbx_back_end.InviteCommand{
-						Command: "invite",
-						Option: pbx_back_end.CallOption{
-							Offer:  frontendEvent.Sdp,
-							Caller: "frontend",
-							Callee: "rust",
-							ASR:    s.asrOption,
-							TTS:    s.ttsOption,
-						},
-					}
-
-					cmdBytes, err := json.Marshal(inviteCmd)
-					if err != nil {
-						log.Println("marshal invite command failed:", err)
-						continue
-					}
-					if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-						log.Printf("forward candidate command to rust backend err: %v, Command data: %s", err, string(cmdBytes))
-						if s.backendConn == nil {
-							log.Println("Backend connection is nil, trying to reconnect")
-							err := s.backendServer.reconnect("webrtc")
-							if err != nil {
-								return
-							} else {
-								// shane: 重发invite
-								log.Println("Reconnected to backend successfully, will retry sending invite command")
-								s.backendConn = s.backendServer.Conn
-								if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-									log.Println("Retrying to forward invite command failed:", err)
-								} else {
-									log.Println("Successfully retried forwarding invite command to rust backend")
-								}
-							}
-						} else {
-							log.Println("Failed to forward invite command to rust backend, will retry later")
-						}
-					} else {
-						log.Println("Forwarded invite command with ASR config to rust backend")
-					}
-				}
-
-				// shane: handle candidate
-				if frontendEvent.Event == "candidate" && frontendEvent.Candidate != nil {
-					log.Printf("Received ICE candidate: %s", string(frontendEvent.Candidate)) // shane: 调试
-
-					// shane: parse candidate
-					var candidate struct {
-						Candidate     string `json:"candidate"`
-						SdpMid        string `json:"sdpMid"`
-						SdpMLineIndex int    `json:"sdpMLineIndex"`
-					}
-					if err := json.Unmarshal(frontendEvent.Candidate, &candidate); err != nil {
-						log.Println("parse candidate failed:", err)
-						continue
-					}
-
-					candidateCmd := pbx_back_end.CandidateCommand{
-						Command:    "candidate",
-						Candidates: []string{candidate.Candidate},
-					}
-
-					// shane: marshal to json
-					cmdBytes, err := json.Marshal(candidateCmd)
-					if err != nil {
-						log.Println("marshal candidate command failed:", err)
-						continue
-					}
-					if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-						log.Println("forward candidate command to rust backend err:", err)
-						err := s.backendServer.reconnect("webrtc")
-						if err != nil {
-							return
-						} else {
-							// shane: 重发candidate
-							s.backendConn = s.backendServer.Conn
-							if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-								log.Println("Retrying to forward candidate command failed:", err)
-							} else {
-								log.Println("Successfully retried forwarding candidate command to rust backend")
-							}
-
-						}
-					}
-				}
-
-				// shane: handle hangup event
-				if frontendEvent.Command == "hangup" {
-					hangupCmd := pbx_back_end.HangupCommand{
-						Command:   "hangup",
-						Reason:    frontendEvent.Reason,
-						Initiator: frontendEvent.Initiator,
-					}
-
-					cmdBytes, err := json.Marshal(hangupCmd)
-					if err != nil {
-						log.Println("marshal hangup command failed:", err)
-						continue
-					}
-					if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-						log.Println("forward hangup command to rust backend err:", err)
-						err := s.backendServer.reconnect("webrtc")
-						if err != nil {
-							return
-						} else {
-							// shane: 重发hangup
-							s.backendConn = s.backendServer.Conn
-							if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-								log.Println("Retrying to forward hangup command failed:", err)
-							} else {
-								log.Println("Successfully retried forwarding hangup command to rust backend")
-							}
-						} // shane: 重连后端
-					} else {
-						log.Println("Forwarded hangup command to rust backend")
-					}
-				}
-			}
-		}
-		close(done)
-	}()
+	go s.ReceiveRealTimeMessage(conn, done) // shane: 启动接收实时消息的协程
 	<-done
 }
 
@@ -334,6 +151,191 @@ func (s *FrontendServer) ReceiveMessages(conn *websocket.Conn, done chan struct{
 	}
 
 	close(done) // shane: 关闭done通道，通知主协程结束
+}
+
+func (s *FrontendServer) ReceiveRealTimeMessage(conn *websocket.Conn, done chan struct{}) {
+	for {
+		if conn == nil {
+			log.Println("Connection is nil, waiting for connection")
+			break
+		}
+		msgType, msg, err := conn.ReadMessage()
+		if err != nil {
+			log.Println("Receive Frontend Message failed:", err)
+			break
+		}
+		// shane: 主动关闭连接
+		if string(msg) == "close" {
+			log.Println("Frontend requested to close connection")
+			break
+		}
+
+		if msgType == websocket.BinaryMessage {
+			// shane: handle audio stram
+			log.Println("Received audio stream from frontend")
+			// log.Println(msg) // shane: 打印音频数据
+			// shane: 转换音频格式
+			convertedAudio, err := s.convertAudio(msg)
+			if err != nil {
+				log.Println("Convert audio format failed:", err)
+				continue
+			}
+
+			// shane: forward audio stream to rust backend
+			if err := s.backendConn.WriteMessage(websocket.BinaryMessage, convertedAudio); err != nil {
+				log.Println("Forward audio stream to rust backend err:", err)
+				err := s.backendServer.reconnect("webrtc")
+				if err != nil {
+					return
+				} else {
+					// shane: reforward audio stream to rust backend
+					if err := s.backendConn.WriteMessage(websocket.BinaryMessage, convertedAudio); err != nil {
+						log.Println("Retrying to forward audio stream failed:", err)
+					} else {
+						log.Println("Successfully retried forwarding audio stream to rust backend")
+					}
+				}
+			} else {
+				log.Println("Forwarded audio stream to rust backend successfully")
+			}
+		} else {
+			// shane: parse message
+			var frontendEvent struct {
+				Event     string          `json:"event"`
+				Sdp       string          `json:"sdp"`
+				Candidate json.RawMessage `json:"candidate"`
+				Command   string          `json:"command"`
+				Reason    string          `json:"reason"`
+				Initiator string          `json:"initiator"`
+			}
+			if err := json.Unmarshal(msg, &frontendEvent); err != nil {
+				log.Println("parse front end message failed:", err)
+				continue
+			}
+
+			// shane: receive offer
+			if frontendEvent.Event == "offer" && frontendEvent.Sdp != "" {
+				log.Printf("receive front end offer message, sdp: %s", frontendEvent.Sdp)
+
+				inviteCmd := pbx_back_end.InviteCommand{
+					Command: "invite",
+					Option: pbx_back_end.CallOption{
+						Offer:  frontendEvent.Sdp,
+						Caller: "frontend",
+						Callee: "rust",
+						ASR:    s.asrOption,
+						TTS:    s.ttsOption,
+					},
+				}
+
+				cmdBytes, err := json.Marshal(inviteCmd)
+				if err != nil {
+					log.Println("marshal invite command failed:", err)
+					continue
+				}
+				if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+					log.Printf("forward candidate command to rust backend err: %v, Command data: %s", err, string(cmdBytes))
+					if s.backendConn == nil {
+						log.Println("Backend connection is nil, trying to reconnect")
+						err := s.backendServer.reconnect("webrtc")
+						if err != nil {
+							return
+						} else {
+							// shane: 重发invite
+							log.Println("Reconnected to backend successfully, will retry sending invite command")
+							s.backendConn = s.backendServer.Conn
+							if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+								log.Println("Retrying to forward invite command failed:", err)
+							} else {
+								log.Println("Successfully retried forwarding invite command to rust backend")
+							}
+						}
+					} else {
+						log.Println("Failed to forward invite command to rust backend, will retry later")
+					}
+				} else {
+					log.Println("Forwarded invite command with ASR config to rust backend")
+				}
+			}
+
+			// shane: handle candidate
+			if frontendEvent.Event == "candidate" && frontendEvent.Candidate != nil {
+				log.Printf("Received ICE candidate: %s", string(frontendEvent.Candidate)) // shane: 调试
+
+				// shane: parse candidate
+				var candidate struct {
+					Candidate     string `json:"candidate"`
+					SdpMid        string `json:"sdpMid"`
+					SdpMLineIndex int    `json:"sdpMLineIndex"`
+				}
+				if err := json.Unmarshal(frontendEvent.Candidate, &candidate); err != nil {
+					log.Println("parse candidate failed:", err)
+					continue
+				}
+
+				candidateCmd := pbx_back_end.CandidateCommand{
+					Command:    "candidate",
+					Candidates: []string{candidate.Candidate},
+				}
+
+				// shane: marshal to json
+				cmdBytes, err := json.Marshal(candidateCmd)
+				if err != nil {
+					log.Println("marshal candidate command failed:", err)
+					continue
+				}
+				if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+					log.Println("forward candidate command to rust backend err:", err)
+					err := s.backendServer.reconnect("webrtc")
+					if err != nil {
+						return
+					} else {
+						// shane: 重发candidate
+						s.backendConn = s.backendServer.Conn
+						if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+							log.Println("Retrying to forward candidate command failed:", err)
+						} else {
+							log.Println("Successfully retried forwarding candidate command to rust backend")
+						}
+
+					}
+				}
+			}
+
+			// shane: handle hangup event
+			if frontendEvent.Command == "hangup" {
+				hangupCmd := pbx_back_end.HangupCommand{
+					Command:   "hangup",
+					Reason:    frontendEvent.Reason,
+					Initiator: frontendEvent.Initiator,
+				}
+
+				cmdBytes, err := json.Marshal(hangupCmd)
+				if err != nil {
+					log.Println("marshal hangup command failed:", err)
+					continue
+				}
+				if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+					log.Println("forward hangup command to rust backend err:", err)
+					err := s.backendServer.reconnect("webrtc")
+					if err != nil {
+						return
+					} else {
+						// shane: 重发hangup
+						s.backendConn = s.backendServer.Conn
+						if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+							log.Println("Retrying to forward hangup command failed:", err)
+						} else {
+							log.Println("Successfully retried forwarding hangup command to rust backend")
+						}
+					} // shane: 重连后端
+				} else {
+					log.Println("Forwarded hangup command to rust backend")
+				}
+			}
+		}
+	}
+	close(done)
 }
 
 // SendMessages shane: 接收到消息之后发送消息

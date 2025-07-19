@@ -6,7 +6,7 @@ import (
 	"pbx_back_end"
 	"pbx_back_end/internal/handler"
 	"pbx_back_end/internal/ws"
-
+	"pbx_back_end/internal/api"
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 )
@@ -180,14 +180,19 @@ func main() {
 	logger := logrus.New()
 	llm := handler.NewLLMHandler(ctx, config.LLM.APIKey, config.LLM.URL, config.LLM.SystemPrompt, logger)
 
-	// shane: create media handler
-	mediaHandler, err := handler.NewMediaHandler(ctx, logger)
-	if err != nil {
-		logger.Fatalf("Failed to create media handler: %v", err)
-	}
-	defer mediaHandler.Stop()
-
 	r := gin.Default()
+
+	// shane: 初始化数据库 (dsn需要更改)
+	dsn := "asus:${yourpassword}@tcp(${yourip}:3306)/VoicePBX?charset=utf8mb4&parseTime=True&loc=Local"
+	repo, err := repository.NewRobotRepository(dsn)
+	if err != nil {
+		log.Fatalf("database connection failed: %v", err)
+	} else {
+		log.Printf("database connected successfully")
+	}
+
+	api.Routers(r, repo)
+	
 	// shane: 后端建立连接
 	backendServer := ws.NewBackendServer(config.Backend.URL)
 	backendConn, err := backendServer.Connect(config.Backend.CallType)

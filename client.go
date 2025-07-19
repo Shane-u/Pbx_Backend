@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"pbx_back_end/config"
-
 	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
 )
@@ -882,10 +880,4 @@ func (c *Client) sendCommand(cmd any) error {
 		"command": cmd,
 	}).Debug("Sending command")
 	return c.conn.WriteJSON(cmd)
-}
-
-// NewClientFromConfig shane: read from config
-func NewClientFromConfig(cfg *config.Config, opts ...ClientOption) *Client {
-	client := NewClient(cfg.OpenAI.Url, opts...)
-	return client
 }

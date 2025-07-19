@@ -2,189 +2,54 @@ package main
 
 import (
 	"context"
-	"log"
-	"pbx_back_end"
-	"pbx_back_end/internal/handler"
-	"pbx_back_end/internal/ws"
-	"pbx_back_end/internal/api"
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
+	"log"
+	"pbx_back_end"
+	"pbx_back_end/config"
+	"pbx_back_end/internal/api"
+	"pbx_back_end/internal/handler"
+	"pbx_back_end/internal/ws"
+	"pbx_back_end/repository"
 )
 
-// shane: AppConfig
-type AppConfig struct {
-	Server struct {
-		Port string
-	}
-	Backend struct {
-		URL      string
-		CallType string
-	}
-	Audio struct {
-		Codec string // shane: g722
-	}
-	ASR struct {
-		Provider   string
-		Language   string
-		SampleRate uint32
-		AppID      string
-		SecretID   string
-		SecretKey  string
-		Endpoint   string
-		ModelType  string
-	}
-	TTS struct {
-		Provider   string
-		SampleRate int32
-		Speaker    string
-		Speed      float32
-		Volume     int32
-		Emotion    string
-		AppID      string
-		SecretID   string
-		SecretKey  string
-		Codec      string
-		Endpoint   string
-	}
-	LLM struct {
-		APIKey       string
-		Model        string
-		URL          string
-		SystemPrompt string
-	}
-	VAD struct {
-		Model     string
-		Endpoint  string
-		SecretKey string
-	}
-	Call struct {
-		BreakOnVAD bool
-		WithSIP    bool
-		Record     bool
-		Caller     string
-		Callee     string
-	}
-	WebHook struct {
-		Addr   string
-		Prefix string
-	}
-	EOU struct {
-		Type     string
-		Endpoint string
-	}
-}
-
 func main() {
-	// shane: 硬编码
-	endpoint := "ws://175.27.250.177:8080"
-	//endpoint := "ws://localhost:8080"
-	codec := "g722"
-	openaiKey := "yours"
-	openaiModel := "qwen-turbo"
-	openaiEndpoint := "https://dashscope.aliyuncs.com/compatible-mode/v1"
-	systemPrompt := "You are a helpful assistant. Provide concise responses. Use 'hangup' tool when the conversation is complete."
-	breakOnVad := false
-	speaker := "101016"
-	callWithSip := false
-	record := false
-	ttsProvider := "tencent"
-	asrProvider := "tencent"
-	caller := ""
-	callee := ""
-	asrEndpoint := "asr.tencentcloudapi.com"
-	asrAppID := "yours"
-	asrSecretID := "yours"
-	asrSecretKey := "yours"
-	asrModelType := "16k_zh"
-	ttsEndpoint := "tts.tencentcloudapi.com"
-	ttsAppID := "yours"
-	ttsSecretID := "yours"
-	ttsSecretKey := "yours"
-	vadModel := "silero"
-	vadEndpoint := ""
-	vadSecretKey := ""
-	webhookAddr := ""
-	webhookPrefix := "/webhook"
-	eouType := ""
-	eouEndpoint := ""
+	cfg, err := config.LoadConfig("../config.yaml") // shane: ! 注意修改配置文件
+	if err != nil {
+		log.Fatalf("failed to load config: %v", err)
+	}
 
-	// shane: init Config
-	config := AppConfig{}
-	config.Server.Port = "8081"
-	config.Backend.URL = endpoint
-	config.Backend.CallType = "webrtc"
-	config.Audio.Codec = codec
-	config.Call.BreakOnVAD = breakOnVad
-	config.Call.WithSIP = callWithSip
-	config.Call.Record = record
-	config.Call.Caller = caller
-	config.Call.Callee = callee
-	config.ASR.Provider = asrProvider
-	config.ASR.Language = "zh-CN"
-	config.ASR.SampleRate = 16000
-	config.ASR.AppID = asrAppID
-	config.ASR.SecretID = asrSecretID
-	config.ASR.SecretKey = asrSecretKey
-	config.ASR.Endpoint = asrEndpoint
-	config.ASR.ModelType = asrModelType
-	config.TTS.Provider = ttsProvider
-	config.TTS.SampleRate = 16000
-	config.TTS.Speaker = speaker
-	config.TTS.Speed = 1.0
-	config.TTS.Volume = 10
-	config.TTS.AppID = ttsAppID
-	config.TTS.SecretID = ttsSecretID
-	config.TTS.SecretKey = ttsSecretKey
-	config.TTS.Endpoint = ttsEndpoint
-	config.TTS.Codec = "pcm"
-	config.VAD.Model = vadModel
-	config.VAD.Endpoint = vadEndpoint
-	config.VAD.SecretKey = vadSecretKey
-	config.WebHook.Addr = webhookAddr
-	config.WebHook.Prefix = webhookPrefix
-	config.EOU.Type = eouType
-	config.EOU.Endpoint = eouEndpoint
-	config.LLM.APIKey = openaiKey
-	config.LLM.Model = openaiModel
-	config.LLM.URL = openaiEndpoint
-	config.LLM.SystemPrompt = systemPrompt
-
-	// shane: create ASR option
 	asrOption := &pbx_back_end.ASROption{
-		Provider:   config.ASR.Provider,
-		Language:   config.ASR.Language,
-		SampleRate: config.ASR.SampleRate,
-		AppID:      config.ASR.AppID,
-		SecretID:   config.ASR.SecretID,
-		SecretKey:  config.ASR.SecretKey,
-		Endpoint:   config.ASR.Endpoint,
-		ModelType:  config.ASR.ModelType,
+		Provider:   cfg.ASR.Provider,
+		Language:   cfg.ASR.Language,
+		SampleRate: cfg.ASR.SampleRate,
+		AppID:      cfg.ASR.AppID,
+		SecretID:   cfg.ASR.SecretID,
+		SecretKey:  cfg.ASR.SecretKey,
+		Endpoint:   cfg.ASR.Endpoint,
+		ModelType:  cfg.ASR.ModelType,
 	}
 
-	// shane: create TTS config
 	ttsOption := &pbx_back_end.TTSOption{
-		Provider:   config.TTS.Provider,
-		Samplerate: config.TTS.SampleRate,
-		Speaker:    config.TTS.Speaker,
-		Speed:      config.TTS.Speed,
-		Volume:     config.TTS.Volume,
-		AppID:      config.TTS.AppID,
-		SecretID:   config.TTS.SecretID,
-		SecretKey:  config.TTS.SecretKey,
-		Codec:      config.TTS.Codec,
-		Endpoint:   config.TTS.Endpoint,
+		Provider:   cfg.TTS.Provider,
+		Samplerate: cfg.TTS.SampleRate,
+		Speaker:    cfg.TTS.Speaker,
+		Speed:      cfg.TTS.Speed,
+		Volume:     cfg.TTS.Volume,
+		AppID:      cfg.TTS.AppID,
+		SecretID:   cfg.TTS.SecretID,
+		SecretKey:  cfg.TTS.SecretKey,
+		Codec:      cfg.TTS.Codec,
+		Endpoint:   cfg.TTS.Endpoint,
 	}
 
-	// shane: create LLM handler
 	ctx := context.Background()
 	logger := logrus.New()
-	llm := handler.NewLLMHandler(ctx, config.LLM.APIKey, config.LLM.URL, config.LLM.SystemPrompt, logger)
+	llm := handler.NewLLMHandler(ctx, cfg.LLM.APIKey, cfg.LLM.URL, cfg.LLM.SystemPrompt, logger)
 
 	r := gin.Default()
-
-	// shane: 初始化数据库 (dsn需要更改)
-	dsn := "asus:${yourpassword}@tcp(${yourip}:3306)/VoicePBX?charset=utf8mb4&parseTime=True&loc=Local"
-	repo, err := repository.NewRobotRepository(dsn)
+	// shane: 初始化数据库
+	repo, err := repository.NewRobotRepository(cfg.Database.DSN)
 	if err != nil {
 		log.Fatalf("database connection failed: %v", err)
 	} else {
@@ -192,20 +57,18 @@ func main() {
 	}
 
 	api.Routers(r, repo)
-	
+
 	// shane: 后端建立连接
-	backendServer := ws.NewBackendServer(config.Backend.URL)
-	backendConn, err := backendServer.Connect(config.Backend.CallType)
+	backendServer := ws.NewBackendServer(cfg.Backend.URL)
+	backendConn, err := backendServer.Connect(cfg.Backend.CallType)
 	if err != nil {
 		log.Fatalf("Unable to connect to backend: %v", err)
 	} else {
 		log.Println("Connected to backend successfully!")
 	}
-
 	// shane: 前端建立连接
-	frontendServer := ws.NewFrontendServer(llm, backendConn, config.Audio.Codec, asrOption, ttsOption)
-	frontendServer.Start(r, config.Server.Port)
+	frontendServer := ws.NewFrontendServer(llm, backendConn, backendServer, cfg.Audio.Codec, asrOption, ttsOption)
+	frontendServer.Start(r, cfg.Server.Port)
 
-	// shane: keep alive
 	select {}
 }

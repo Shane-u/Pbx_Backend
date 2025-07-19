@@ -47,3 +47,5 @@ webhook:
 eou:
   type: ""
   endpoint: ""
+database:
+  dsn: "{}:{}@tcp({}:3306)/VoicePBX?charset=utf8mb4&parseTime=True&loc=Local"

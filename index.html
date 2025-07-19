@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+
+<body>
+    <button onclick="connectWebRTC()">建立语音连接</button>
+    <div id="log"></div>
+    <audio id="audio" autoplay></audio>
+
+    <script>
+        // shane: 建立 WebSocket 通信
+        const ws = new WebSocket('ws://localhost:8081/ws2');
+        let peerConnection = null;
+        let isConnected = false;
+
+        ws.onopen = function () {
+            log('WebSocket connected!');
+        };
+
+        ws.onmessage = function (event) {
+            try {
+                if(typeof event.data === 'string') {
+                    log('Received string message: ' + event.data);
+                    return;
+                }
+                const message = JSON.parse(event.data);
+                log('Received Messages: ' + JSON.stringify(message));
+
+
+                if (message.event === 'answer') {
+                    handleAnswer(message.sdp);
+                } else if (message.event === 'candidate') {
+                    handleCandidate(message.candidate);
+                } else if (message.event === 'trackStart') {
+                    log('Remote media track has started');
+                }else if (message.event === 'asrDelta') {
+                    log('ASR realtime recognition: ' + message.text);
+                } else if (message.event === 'asrFinal') {
+                    log('ASR Final Result: ' + message.text);
+                } else if (message.event === 'llmResponse') {
+                    log('AI Response: ' + message.text);
+                    document.getElementById('llmResponse').textContent = message.text;
+                }
+            } catch (error) {
+                log('parse message failed: ' + error.message);
+            }
+        };
+
+        ws.onclose = function () {
+            log('WebSocket Connection closed!');
+            isConnected = false;
+        };
+
+        // shane: 错误回调函数
+        ws.onerror = function (error) {
+            log('WebSocket error: ' + error.message);
+        };
+
+        async function connectWebRTC() {
+            if (isConnected) {
+                log('WebRTC already connected！');
+                return;
+            }
+
+            log('Start to handle WebRTC Connection');
+
+            try {
+                // shane: create RTCPeerConnection
+                peerConnection = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                });
+
+                // shane: 获取本地媒体权限，并且获取音轨添加到 PeerConnection
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                stream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, stream);
+                });
+                log('Access and add to track!');
+
+                // shane: 监听回调远程音频流
+                peerConnection.ontrack = function (event) {
+                    log('[DEBUG] Received remote media stream (ontrack)');
+                    const audioElement = document.getElementById('audio');
+                    audioElement.srcObject = event.streams[0];
+                    if (event.streams[0]) {
+                        log('[DEBUG] audio.srcObject set, stream tracks: ' + event.streams[0].getTracks().length);
+                    } else {
+                        log('[WARN] event.streams[0] is null');
+                    }
+                    // shane: 尝试自动播放
+                    audioElement.play().then(() => {
+                        log('[DEBUG] audio.play() success');
+                    }).catch(e => {
+                        log('[ERROR] audio.play() failed: ' + e.message);
+                    });
+                };
+
+                // shane: ICE 候选生成，发送到 Go 后端
+                peerConnection.onicecandidate = function (event) {
+                    if (event.candidate) {
+                        log('send ICE candidate to Go backend!');
+                        ws.send(JSON.stringify({
+                            event: 'candidate',
+                            candidate: event.candidate
+                        }));
+                    }
+                };
+
+                // shane: create SDP Offer and set local description
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                log('has created Offer and set local description');
+
+                // shane: send Offer to Go backend, and help forward to remote peer
+                ws.send(JSON.stringify({
+                    event: 'offer',
+                    sdp: offer.sdp
+                }));
+
+                isConnected = true;
+            } catch (error) {
+                log('create connection failed: ' + error.message);
+            }
+        }
+
+        async function handleAnswer(sdp) {
+            try {
+                const answer = new RTCSessionDescription({
+                    type: 'answer',
+                    sdp: sdp
+                });
+
+                await peerConnection.setRemoteDescription(answer);
+                log('has set remote description');
+            } catch (error) {
+                log('handle Answer failed: ' + error.message);
+            }
+        }
+
+        async function handleCandidate(candidate) {
+            try {
+                // shane: hanle ICE candidate from Go backend
+                await peerConnection.addIceCandidate(candidate);
+                log('had add ICE candidate');
+            } catch (error) {
+                log('handle ICE candidate failed: ' + error.message);
+            }
+        }
+
+        // shane: handle log
+        function log(text) {
+            const logDiv = document.getElementById('log');
+            const p = document.createElement('p');
+            p.textContent = new Date().toLocaleTimeString() + ' - ' + text;
+            logDiv.appendChild(p);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+    </script>
+</body>
+
+</html>

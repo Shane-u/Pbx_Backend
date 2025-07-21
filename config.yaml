@@ -31,6 +31,11 @@ llm:
   model: "qwen-turbo"
   url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   system_prompt: "You are a helpful assistant. Provide concise responses. Use 'hangup' tool when the conversation is complete."
+  siliconflow:
+    api_key: ""
+    url: "https://api.siliconflow.cn/v1/chat/completions"
+    model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+    system_prompt: "You are a helpful assistant. Provide concise responses. Use 'hangup' tool when the conversation is complete."
 vad:
   model: "silero"
   endpoint: ""

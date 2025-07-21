@@ -16,30 +16,32 @@ import (
 
 // FrontendServer 管理前端WebSocket连接
 type FrontendServer struct {
-	upgrader      websocket.Upgrader
-	clients       map[*websocket.Conn]bool
-	conn          *websocket.Conn
-	RealTimeConn  *websocket.Conn
-	llm           *handler.LLMHandler
-	backendConn   *websocket.Conn // shane: 与后端的连接
-	backendServer *BackendServer  // shane: 后端服务实例
-	codec         string          // shane: codec for audio stream
-	asrOption     *pbx_back_end.ASROption
-	ttsOption     *pbx_back_end.TTSOption
+	upgrader       websocket.Upgrader
+	clients        map[*websocket.Conn]bool
+	conn           *websocket.Conn
+	RealTimeConn   *websocket.Conn
+	llm            *handler.LLMHandler
+	siliconFlowLLM *handler.SiliconFlowHandler // shane: siliconflow LLM handler
+	backendConn    *websocket.Conn             // shane: 与后端的连接
+	backendServer  *BackendServer              // shane: 后端服务实例
+	codec          string                      // shane: codec for audio stream
+	asrOption      *pbx_back_end.ASROption
+	ttsOption      *pbx_back_end.TTSOption
 }
 
-func NewFrontendServer(llm *handler.LLMHandler, backendConn *websocket.Conn, backendServer *BackendServer, codec string, asrOption *pbx_back_end.ASROption, ttsOption *pbx_back_end.TTSOption) *FrontendServer {
+func NewFrontendServer(llm *handler.LLMHandler, siliconFlowLLM *handler.SiliconFlowHandler, backendConn *websocket.Conn, backendServer *BackendServer, codec string, asrOption *pbx_back_end.ASROption, ttsOption *pbx_back_end.TTSOption) *FrontendServer {
 	return &FrontendServer{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true }, // shane: 允许跨域
 		}, // http的升级
-		clients:       make(map[*websocket.Conn]bool),
-		llm:           llm,
-		backendConn:   backendConn,
-		backendServer: backendServer,
-		codec:         codec,
-		asrOption:     asrOption,
-		ttsOption:     ttsOption,
+		clients:        make(map[*websocket.Conn]bool),
+		llm:            llm,
+		siliconFlowLLM: siliconFlowLLM, // shane: siliconflow LLM handler
+		backendConn:    backendConn,
+		backendServer:  backendServer,
+		codec:          codec,
+		asrOption:      asrOption,
+		ttsOption:      ttsOption,
 	}
 }
 
@@ -318,7 +320,9 @@ func (s *FrontendServer) SendMessages(conn *websocket.Conn, msg []byte) {
 	}
 
 	// shane: 发送LLM处理后的消息到前端
-	response, _, err := s.llm.Query("qwen-turbo", string(msg))
+	//response, _, err := s.llm.Query("qwen-turbo", string(msg))
+	// shane: 发送SiliconFlowLLM处理后的消息到前端
+	response, err := s.siliconFlowLLM.Query(string(msg))
 	if err != nil {
 		log.Println("LLM query failed:", err)
 		return
@@ -365,7 +369,8 @@ func (s *FrontendServer) receiveBackendMessages() {
 				// shane: use LLM to handle ASR result
 				if s.llm != nil {
 					log.Printf("handle ASR result via LLM...")
-					response, _, err := s.llm.Query("qwen-turbo", event.Text)
+					//response, _, err := s.llm.Query("qwen-turbo", event.Text)
+					response, err := s.siliconFlowLLM.Query(event.Text)
 					if err != nil {
 						log.Println("LLM handle ASR result failed:", err)
 					} else {

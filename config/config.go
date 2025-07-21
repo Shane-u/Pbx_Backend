@@ -63,6 +63,11 @@ type LLMConfig struct {
 	Model        string `yaml:"model"`
 	URL          string `yaml:"url"`
 	SystemPrompt string `yaml:"system_prompt"`
+	SiliconFlow  struct {
+		APIKey string `yaml:"api_key"`
+		URL    string `yaml:"url"`
+		Model  string `yaml:"model"`
+	} `yaml:"siliconflow"`
 }
 type VADConfig struct {
 	Model     string `yaml:"model"`

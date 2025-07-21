@@ -46,6 +46,7 @@ func main() {
 	ctx := context.Background()
 	logger := logrus.New()
 	llm := handler.NewLLMHandler(ctx, cfg.LLM.APIKey, cfg.LLM.URL, cfg.LLM.SystemPrompt, logger)
+	siliconFlowLLM := handler.NewSiliconFlowHandler(ctx, cfg.LLM.SiliconFlow.APIKey, cfg.LLM.SiliconFlow.URL, cfg.LLM.SiliconFlow.Model, logger)
 
 	r := gin.Default()
 	// shane: 初始化数据库
@@ -67,7 +68,7 @@ func main() {
 		log.Println("Connected to backend successfully!")
 	}
 	// shane: 前端建立连接
-	frontendServer := ws.NewFrontendServer(llm, backendConn, backendServer, cfg.Audio.Codec, asrOption, ttsOption)
+	frontendServer := ws.NewFrontendServer(llm, siliconFlowLLM, backendConn, backendServer, cfg.Audio.Codec, asrOption, ttsOption)
 	frontendServer.Start(r, cfg.Server.Port)
 
 	select {}

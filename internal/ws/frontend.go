@@ -170,35 +170,7 @@ func (s *FrontendServer) ReceiveRealTimeMessage(conn *websocket.Conn, done chan 
 			break
 		}
 
-		if msgType == websocket.BinaryMessage {
-			// shane: handle audio stram
-			log.Println("Received audio stream from frontend")
-			// log.Println(msg) // shane: 打印音频数据
-			// shane: 转换音频格式
-			convertedAudio, err := s.convertAudio(msg)
-			if err != nil {
-				log.Println("Convert audio format failed:", err)
-				continue
-			}
-
-			// shane: forward audio stream to rust backend
-			if err := s.backendConn.WriteMessage(websocket.BinaryMessage, convertedAudio); err != nil {
-				log.Println("Forward audio stream to rust backend err:", err)
-				err := s.backendServer.reconnect("webrtc")
-				if err != nil {
-					return
-				} else {
-					// shane: reforward audio stream to rust backend
-					if err := s.backendConn.WriteMessage(websocket.BinaryMessage, convertedAudio); err != nil {
-						log.Println("Retrying to forward audio stream failed:", err)
-					} else {
-						log.Println("Successfully retried forwarding audio stream to rust backend")
-					}
-				}
-			} else {
-				log.Println("Forwarded audio stream to rust backend successfully")
-			}
-		} else {
+		if msgType == websocket.TextMessage {
 			// shane: parse message
 			var frontendEvent struct {
 				Event     string          `json:"event"`

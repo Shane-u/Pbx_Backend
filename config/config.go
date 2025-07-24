@@ -19,6 +19,7 @@ type Config struct {
 	WebHook  WebHookConfig  `yaml:"webhook"`
 	EOU      EOUConfig      `yaml:"eou"`
 	Database DatabaseConfig `yaml:"database"`
+	BigModel BigModelConfig `yaml:"big_model"`
 }
 
 type DatabaseConfig struct {
@@ -68,6 +69,12 @@ type LLMConfig struct {
 		URL    string `yaml:"url"`
 		Model  string `yaml:"model"`
 	} `yaml:"siliconflow"`
+}
+
+type BigModelConfig struct {
+	SearchApiUrl   string `yaml:"search_api_url"`
+	SearchApiKey   string `yaml:"search_api_key"`
+	SearchApiModel string `yaml:"search_api_model"`
 }
 type VADConfig struct {
 	Model     string `yaml:"model"`

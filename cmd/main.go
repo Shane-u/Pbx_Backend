@@ -46,7 +46,7 @@ func main() {
 	ctx := context.Background()
 	logger := logrus.New()
 	llm := handler.NewLLMHandler(ctx, cfg.LLM.APIKey, cfg.LLM.URL, cfg.LLM.SystemPrompt, logger)
-	siliconFlowLLM := handler.NewSiliconFlowHandler(ctx, cfg.LLM.SiliconFlow.APIKey, cfg.LLM.SiliconFlow.URL, cfg.LLM.SiliconFlow.Model, logger)
+	siliconFlowLLM := handler.NewSiliconFlowHandler(ctx, cfg.LLM.SiliconFlow.APIKey, cfg.LLM.SiliconFlow.URL, cfg.LLM.SiliconFlow.Model, logger, cfg.BigModel.SearchApiUrl, cfg.BigModel.SearchApiKey, cfg.BigModel.SearchApiModel)
 
 	r := gin.Default()
 	// shane: 初始化数据库

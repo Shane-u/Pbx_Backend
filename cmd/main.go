@@ -4,7 +4,6 @@ import (
 	"context"
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
-	"log"
 	"pbx_back_end"
 	"pbx_back_end/config"
 	"pbx_back_end/internal/api"
@@ -16,7 +15,7 @@ import (
 func main() {
 	cfg, err := config.LoadConfig("../config.yaml") // shane: ! 注意修改配置文件
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		logrus.Errorf("failed to load config: %v", err)
 	}
 
 	asrOption := &pbx_back_end.ASROption{
@@ -49,12 +48,13 @@ func main() {
 	siliconFlowLLM := handler.NewSiliconFlowHandler(ctx, cfg.LLM.SiliconFlow.APIKey, cfg.LLM.SiliconFlow.URL, cfg.LLM.SiliconFlow.Model, logger, cfg.BigModel.SearchApiUrl, cfg.BigModel.SearchApiKey, cfg.BigModel.SearchApiModel)
 
 	r := gin.Default()
+	gin.SetMode(gin.ReleaseMode)
 	// shane: 初始化数据库
 	repo, err := repository.NewRobotRepository(cfg.Database.DSN)
 	if err != nil {
-		log.Fatalf("database connection failed: %v", err)
+		logrus.Errorf("database connection failed: %v", err)
 	} else {
-		log.Printf("database connected successfully")
+		logrus.Info("database connected successfully")
 	}
 
 	api.Routers(r, repo)
@@ -63,9 +63,9 @@ func main() {
 	backendServer := ws.NewBackendServer(cfg.Backend.URL)
 	backendConn, err := backendServer.Connect(cfg.Backend.CallType)
 	if err != nil {
-		log.Fatalf("Unable to connect to backend: %v", err)
+		logrus.Errorf("Unable to connect to backend: %v", err)
 	} else {
-		log.Println("Connected to backend successfully!")
+		logrus.Info("Connected to backend successfully!")
 	}
 	// shane: 前端建立连接
 	frontendServer := ws.NewFrontendServer(llm, siliconFlowLLM, backendConn, backendServer, cfg.Audio.Codec, asrOption, ttsOption)

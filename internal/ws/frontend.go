@@ -2,6 +2,7 @@ package ws
 
 import (
 	"encoding/json"
+	"github.com/sirupsen/logrus"
 	"log"
 	"net/http"
 	"pbx_back_end"
@@ -30,6 +31,7 @@ type FrontendServer struct {
 }
 
 func NewFrontendServer(llm *handler.LLMHandler, siliconFlowLLM *handler.SiliconFlowHandler, backendConn *websocket.Conn, backendServer *BackendServer, codec string, asrOption *pbx_back_end.ASROption, ttsOption *pbx_back_end.TTSOption) *FrontendServer {
+	// func NewFrontendServer(llm *handler.LLMHandler, siliconFlowLLM *handler.SiliconFlowHandler, codec string, asrOption *pbx_back_end.ASROption, ttsOption *pbx_back_end.TTSOption) *FrontendServer {
 	return &FrontendServer{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true }, // shane: 允许跨域
@@ -63,23 +65,23 @@ func (s *FrontendServer) Start(r *gin.Engine, port string) {
 
 	go func() {
 		if err := r.Run(":" + port); err != nil {
-			log.Println("Connection failed:", err)
+			logrus.Error("Connection failed:", err)
 		}
 	}() // shane: 开协程防止阻塞
-	log.Printf("Connected to the front end! Serve on %s", port)
+	logrus.Infof("Connected to the front end! Serve on %s", port)
 }
 
 // shane: 处理前端WebSocket连接
 func (s *FrontendServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("Upgrade Connection Failed:", err)
+		logrus.Error("Upgrade Connection Failed:", err)
 		return
 	}
 	defer func() {
 		conn.Close()
 		delete(s.clients, conn)
-		log.Println("WebSocket Connection closed")
+		logrus.Info("WebSocket Connection closed")
 	}()
 	s.clients[conn] = true // shane: 设置已经连接（状态信息）
 	s.conn = conn          // shane: 一定要记住保存连接，后面需要用到
@@ -93,14 +95,14 @@ func (s *FrontendServer) handleWebSocket(w http.ResponseWriter, r *http.Request)
 func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("Upgrade Connection Failed:", err)
+		logrus.Error("Upgrade Connection Failed:", err)
 		return
 	}
 	defer func() {
 		conn.Close()
 		delete(s.clients, conn)
 		s.RealTimeConn = nil
-		log.Println("RealTime WebSocket Connection closed")
+		logrus.Info("RealTime WebSocket Connection closed")
 	}()
 	s.clients[conn] = true // shane: 设置已经连接（状态信息）
 	s.RealTimeConn = conn  // shane: 一定要记住保存连接，后面需要用到
@@ -133,21 +135,21 @@ func (s *FrontendServer) ReceiveMessages(conn *websocket.Conn, done chan struct{
 	// shane: 接收前端发送的消息
 	for {
 		if conn == nil {
-			log.Println("Connection is nil, waiting for connection")
+			logrus.Error("Connection is nil, waiting for connection")
 			break
 		}
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			log.Println("Receive from frontend failed:", err)
+			logrus.Error("Receive from frontend failed:", err)
 			delete(s.clients, s.conn)
 			break
 		}
 		// shane: 主动关闭连接
 		if string(msg) == "close" {
-			log.Println("Frontend requested to close connection")
+			logrus.Info("Frontend requested to close connection")
 			break
 		}
-		log.Printf("Receive from frontend: %s", string(msg))
+		logrus.Infof("Receive from frontend: %s", string(msg))
 		// s.handleMessage(msg)
 		s.SendMessages(conn, msg) // shane: 接收到消息之后发送消息
 	}
@@ -158,17 +160,17 @@ func (s *FrontendServer) ReceiveMessages(conn *websocket.Conn, done chan struct{
 func (s *FrontendServer) ReceiveRealTimeMessage(conn *websocket.Conn, done chan struct{}) {
 	for {
 		if conn == nil {
-			log.Println("Connection is nil, waiting for connection")
+			logrus.Info("Connection is nil, waiting for connection")
 			break
 		}
 		msgType, msg, err := conn.ReadMessage()
 		if err != nil {
-			log.Println("Receive Frontend Message failed:", err)
+			logrus.Error("Receive Frontend Message failed:", err)
 			break
 		}
 		// shane: 主动关闭连接
 		if string(msg) == "close" {
-			log.Println("Frontend requested to close connection")
+			logrus.Info("Frontend requested to close connection")
 			break
 		}
 
@@ -183,13 +185,13 @@ func (s *FrontendServer) ReceiveRealTimeMessage(conn *websocket.Conn, done chan 
 				Initiator string          `json:"initiator"`
 			}
 			if err := json.Unmarshal(msg, &frontendEvent); err != nil {
-				log.Println("parse front end message failed:", err)
+				logrus.Error("parse front end message failed:", err)
 				continue
 			}
 
 			// shane: receive offer
 			if frontendEvent.Event == "offer" && frontendEvent.Sdp != "" {
-				log.Printf("receive front end offer message, sdp: %s", frontendEvent.Sdp)
+				logrus.Infof("receive front end offer message, sdp: %s", frontendEvent.Sdp)
 
 				inviteCmd := pbx_back_end.InviteCommand{
 					Command: "invite",
@@ -204,78 +206,33 @@ func (s *FrontendServer) ReceiveRealTimeMessage(conn *websocket.Conn, done chan 
 
 				cmdBytes, err := json.Marshal(inviteCmd)
 				if err != nil {
-					log.Println("marshal invite command failed:", err)
+					logrus.Error("marshal invite command failed:", err)
 					continue
 				}
 				if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-					log.Printf("forward candidate command to rust backend err: %v, Command data: %s", err, string(cmdBytes))
+					logrus.Infof("forward candidate command to rust backend err: %v, Command data: %s", err, string(cmdBytes))
 					if s.backendConn == nil {
-						log.Println("Backend connection is nil, trying to reconnect")
+						logrus.Errorf("Backend connection is nil, trying to reconnect")
 						err := s.backendServer.reconnect("webrtc")
 						if err != nil {
 							return
 						} else {
 							// shane: 重发invite
-							log.Println("Reconnected to backend successfully, will retry sending invite command")
+							logrus.Info("Reconnected to backend successfully, will retry sending invite command")
 							s.backendConn = s.backendServer.Conn
 							if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-								log.Println("Retrying to forward invite command failed:", err)
+								logrus.Error("Retrying to forward invite command failed:", err)
 							} else {
-								log.Println("Successfully retried forwarding invite command to rust backend")
+								logrus.Info("Successfully retried forwarding invite command to rust backend")
 							}
 						}
 					} else {
-						log.Println("Failed to forward invite command to rust backend, will retry later")
+						logrus.Error("Failed to forward invite command to rust backend, will retry later")
 					}
 				} else {
-					log.Println("Forwarded invite command with ASR config to rust backend")
+					logrus.Info("Forwarded invite command with ASR config to rust backend")
 				}
 			}
-
-			// shane: handle candidate
-			if frontendEvent.Event == "candidate" && frontendEvent.Candidate != nil {
-				log.Printf("Received ICE candidate: %s", string(frontendEvent.Candidate)) // shane: 调试
-
-				// shane: parse candidate
-				var candidate struct {
-					Candidate     string `json:"candidate"`
-					SdpMid        string `json:"sdpMid"`
-					SdpMLineIndex int    `json:"sdpMLineIndex"`
-				}
-				if err := json.Unmarshal(frontendEvent.Candidate, &candidate); err != nil {
-					log.Println("parse candidate failed:", err)
-					continue
-				}
-
-				candidateCmd := pbx_back_end.CandidateCommand{
-					Command:    "candidate",
-					Candidates: []string{candidate.Candidate},
-				}
-
-				// shane: marshal to json
-				cmdBytes, err := json.Marshal(candidateCmd)
-				if err != nil {
-					log.Println("marshal candidate command failed:", err)
-					continue
-				}
-				if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-					log.Println("forward candidate command to rust backend err:", err)
-					err := s.backendServer.reconnect("webrtc")
-					if err != nil {
-						return
-					} else {
-						// shane: 重发candidate
-						s.backendConn = s.backendServer.Conn
-						if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-							log.Println("Retrying to forward candidate command failed:", err)
-						} else {
-							log.Println("Successfully retried forwarding candidate command to rust backend")
-						}
-
-					}
-				}
-			}
-
 			// shane: handle hangup event
 			if frontendEvent.Command == "hangup" {
 				hangupCmd := pbx_back_end.HangupCommand{
@@ -315,7 +272,7 @@ func (s *FrontendServer) ReceiveRealTimeMessage(conn *websocket.Conn, done chan 
 // SendMessages shane: 接收到消息之后发送消息
 func (s *FrontendServer) SendMessages(conn *websocket.Conn, msg []byte) {
 	if conn == nil {
-		log.Println("Connection is nil, waiting for connection")
+		logrus.Error("Connection is nil, waiting for connection")
 		return
 	}
 
@@ -324,12 +281,12 @@ func (s *FrontendServer) SendMessages(conn *websocket.Conn, msg []byte) {
 	// shane: 发送SiliconFlowLLM处理后的消息到前端
 	response, err := s.siliconFlowLLM.Query(string(msg))
 	if err != nil {
-		log.Println("LLM query failed:", err)
+		logrus.Error("LLM query failed:", err)
 		return
 	}
 	// shane: 发送回复到前端
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(response)); err != nil {
-		log.Println("sendMessage failed:", err)
+		logrus.Error("sendMessage failed:", err)
 	}
 }
 
@@ -354,7 +311,7 @@ func (s *FrontendServer) receiveBackendMessages() {
 			continue
 		}
 		// shane: type down message fron rust backend
-		log.Printf("Received from rust backend (type %d): %s", messageType, string(msg))
+		logrus.Infof("Received from rust backend (type %d): %s", messageType, string(msg))
 
 		// shane: parse the message
 		var event struct {
@@ -364,26 +321,26 @@ func (s *FrontendServer) receiveBackendMessages() {
 		if err := json.Unmarshal(msg, &event); err == nil {
 			// shane: handle asrFinal and send ASR result to LLM handler
 			if event.Event == "asrFinal" && event.Text != "" {
-				log.Printf("received ASR response: %s", event.Text)
+				logrus.Infof("received ASR response: %s", event.Text)
 
 				// shane: use LLM to handle ASR result
 				if s.llm != nil {
-					log.Printf("handle ASR result via LLM...")
+					logrus.Info("handle ASR result via LLM...")
 					//response, _, err := s.llm.Query("qwen-turbo", event.Text)
 					response, err := s.siliconFlowLLM.Query(event.Text)
 					if err != nil {
-						log.Println("LLM handle ASR result failed:", err)
+						logrus.Error("LLM handle ASR result failed:", err)
 					} else {
-						log.Printf("LLM response: %s", response)
+						logrus.Infof("LLM response: %s", response)
 						if s.RealTimeConn != nil {
 							if err := s.RealTimeConn.WriteMessage(websocket.TextMessage, []byte(response)); err != nil {
-								log.Printf("Failed to send LLM response to frontend: %v", err)
+								logrus.Errorf("Failed to send LLM response to frontend: %v", err)
 								if websocket.IsCloseError(err, websocket.CloseGoingAway) {
 									s.RealTimeConn = nil
 								}
 							}
 						} else {
-							log.Println("RealTime conn is nil, cannot send LLM response")
+							logrus.Error("RealTime conn is nil, cannot send LLM response")
 						}
 
 						// shane: send TTS command to Rust backend
@@ -396,27 +353,27 @@ func (s *FrontendServer) receiveBackendMessages() {
 
 						cmdBytes, err := json.Marshal(ttsCmd)
 						if err != nil {
-							log.Println("generate TTS Command failed:", err)
+							logrus.Error("generate TTS Command failed:", err)
 						} else {
 							if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-								log.Println("send TTS command to Rust backend failed:", err)
+								logrus.Error("send TTS command to Rust backend failed:", err)
 							} else {
-								log.Println("TTS command sent to Rust backend successfully")
+								logrus.Info("TTS command sent to Rust backend successfully")
 							}
 						}
 					}
 				}
 			} else if event.Event == "asrDelta" {
 				// shane: handle ASR delta event
-				log.Printf("ASR realtime recognize: %s", event.Text)
+				logrus.Infof("ASR realtime recognize: %s", event.Text)
 			} else if event.Event == "speaking" {
-				log.Printf("detecting speaking")
+				logrus.Info("detecting speaking")
 			} else if event.Event == "silence" {
-				log.Printf("detecting silence")
+				logrus.Info("detecting silence")
 			} else if event.Event == "trackStart" {
-				log.Printf("track started")
+				logrus.Info("track started")
 			} else if event.Event == "trackEnd" {
-				log.Printf("track ended")
+				logrus.Info("track ended")
 			}
 		}
 
@@ -431,11 +388,11 @@ func (s *FrontendServer) receiveBackendMessages() {
 func (s *FrontendServer) forwardRustMessageToFrontend(msg []byte) {
 	if s.RealTimeConn != nil {
 		if err := s.RealTimeConn.WriteMessage(websocket.TextMessage, msg); err != nil {
-			log.Println("Failed to forward backend message to frontend:", err)
+			logrus.Error("Failed to forward backend message to frontend:", err)
 		} else {
-			log.Println("Successfully forwarded backend message to frontend")
+			logrus.Info("Successfully forwarded backend message to frontend")
 		}
 	} else {
-		log.Println("Frontend connection is nil, cannot forward message")
+		logrus.Error("Frontend connection is nil, cannot forward message")
 	}
 }

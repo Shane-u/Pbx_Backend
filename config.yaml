@@ -34,11 +34,11 @@ llm:
   siliconflow:
     api_key: ""
     url: "https://api.siliconflow.cn/v1/chat/completions"
-    model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+    model: "THUDM/GLM-Z1-9B-0414"
     system_prompt: "You are a helpful assistant. Provide concise responses. Use 'hangup' tool when the conversation is complete. 如果我说使用联网搜索那你就使用这个search online这个工具，如果我说生成图片那你就使用generate image这个工具.please use Chinese to replay!! 铭记使用中文回答！！"
 big_model:
   # https://bigmodel.cn/dev/howuse/introduction 注册账号获取API Key
-  search_api_url: "https://open.bigmodel.cn/api/paas/v4/tools"
+  search_api_url: "https://open.bigmodel.cn/api/paas/v4/assistant"
   search_api_key: ""
   search_api_model: "glm-4v-flash"
 vad:

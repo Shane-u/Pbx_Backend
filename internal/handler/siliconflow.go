@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -139,6 +138,26 @@ type SearchResult struct {
 	Title   string `json:"title"`
 }
 
+type WeatherResponse struct {
+	Precipitation       float64 `json:"precipitation"`
+	Temperature         float64 `json:"temperature"`
+	Pressure            int     `json:"pressure"`
+	Humidity            int     `json:"humidity"`
+	WindDirection       string  `json:"windDirection"`
+	WindDirectionDegree int     `json:"windDirectionDegree"`
+	WindSpeed           float64 `json:"windSpeed"`
+	WindScale           string  `json:"windScale"`
+	Feelst              float64 `json:"feelst"`
+	Code                int     `json:"code"`
+	Place               string  `json:"place"`
+	Weather1            string  `json:"weather1"`
+	Weather2            string  `json:"weather2"`
+	Weather1img         string  `json:"weather1img"`
+	Weather2img         string  `json:"weather2img"`
+	Uptime              string  `json:"uptime"`
+	Jieqi               string  `json:"jieqi"`
+}
+
 func NewSiliconFlowHandler(ctx context.Context, apiKey, endpoint, model string, logger *logrus.Logger, searchApiUrl string, searchApiKey string, searchApiModel string) *SiliconFlowHandler {
 	return &SiliconFlowHandler{
 		ctx:            ctx,
@@ -202,6 +221,26 @@ func (h *SiliconFlowHandler) Query(userMsg string) (string, error) {
 				Required: []string{"prompt"},
 			},
 		},
+		{
+			Type: "function",
+			Function: struct {
+				Description string      `json:"description"`
+				Name        string      `json:"name"`
+				Parameters  interface{} `json:"parameters"`
+				Required    []string    `json:"required"`
+			}{
+				Description: "查询指定地点的天气信息,需要剥离出省份信息放到sheng参数里面,并且需要剥离出地点的信息放到place参数里面",
+				Name:        "queryWeather",
+				Parameters: struct {
+					Sheng string `json:"sheng"`
+					Place string `json:"place"`
+				}{
+					Sheng: "",
+					Place: "",
+				},
+				Required: []string{"sheng", "place"},
+			},
+		},
 	}
 
 	reqBody := SFRequest{
@@ -225,6 +264,7 @@ func (h *SiliconFlowHandler) Query(userMsg string) (string, error) {
 	}
 	defer resp.Body.Close()
 	respBody, _ := ioutil.ReadAll(resp.Body)
+	logrus.Infof("LLM respBody:%s", string(respBody))
 
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("status code: %d, body: %s", resp.StatusCode, string(respBody))
@@ -248,11 +288,17 @@ func (h *SiliconFlowHandler) Query(userMsg string) (string, error) {
 		// shane: handle the tool call
 		switch funcName {
 		case "searchOnline":
+			logrus.Info("[Handling searchOnline tool call]")
 			return h.handleSearchOnline(arguments, userMsg, toolCallId)
 		case "generateImage":
 			// shane: handle image generation
+			logrus.Info("[Handling generateImage tool call]")
 			return h.handleGenerateImage(arguments)
+		case "queryWeather":
+			logrus.Info("[Handling queryWeather tool call]")
+			return h.handleQueryWeather(arguments, userMsg, toolCallId)
 		default:
+			logrus.Info("[Handling no tool call]")
 			return "", fmt.Errorf("unknown function: %s", funcName)
 		}
 	}
@@ -321,7 +367,7 @@ func (h *SiliconFlowHandler) handleGenerateImage(arguments string) (string, erro
 		Prompt string `json:"prompt"`
 	}{}
 	if err := json.Unmarshal([]byte(arguments), &argumentsJson); err != nil {
-		h.logger.Errorf("Failed to unmarshal image generation arguments: %v", err)
+		h.logger.Errorf("Failed to unmarshal image generation arguments: %v, arguments = %s", err, string(arguments))
 		return "", err
 	}
 
@@ -353,7 +399,7 @@ func (h *SiliconFlowHandler) SearchOnline(query string) (SearchOnlineStruct, err
 	marshal, err := json.Marshal(searchJson)
 	if err != nil {
 		fmt.Println(err)
-		log.Println(err)
+		logrus.Error(err)
 		return SearchOnlineStruct{}, err
 	}
 	request, err := http.NewRequest("POST", h.searchApiUrl, bytes.NewReader(marshal))
@@ -404,7 +450,40 @@ func (h *SiliconFlowHandler) SearchOnline(query string) (SearchOnlineStruct, err
 		var outputs []map[string]interface{}
 		err = json.Unmarshal([]byte(cleanStr), &outputs)
 		if err != nil {
-			return SearchOnlineStruct{}, fmt.Errorf("failed to unmarshal search results: %v, content: %s", err, cleanStr)
+			// shane: if parsing fails, return an error with the original content
+			return SearchOnlineStruct{
+				Choices: []struct {
+					Message struct {
+						ToolCalls []struct {
+							Id           string         `json:"id"`
+							SearchResult []SearchResult `json:"search_result"`
+						} `json:"tool_calls"`
+					} `json:"message"`
+				}{
+					{
+						Message: struct {
+							ToolCalls []struct {
+								Id           string         `json:"id"`
+								SearchResult []SearchResult `json:"search_result"`
+							} `json:"tool_calls"`
+						}{
+							ToolCalls: []struct {
+								Id           string         `json:"id"`
+								SearchResult []SearchResult `json:"search_result"`
+							}{
+								{
+									Id: "search_result",
+									SearchResult: []SearchResult{{
+										Title:   "搜索结果原始内容",
+										Content: fmt.Sprintf("搜索结果原始内容: %s", cleanStr),
+										Link:    "",
+									}},
+								},
+							},
+						},
+					},
+				},
+			}, nil
 		}
 
 		// shane: convert to SearchResult
@@ -467,6 +546,80 @@ func (h *SiliconFlowHandler) SearchOnline(query string) (SearchOnlineStruct, err
 	}
 
 	return result, nil
+}
+
+func (h *SiliconFlowHandler) handleQueryWeather(arguments string, userMsg string, toolCallId string) (string, error) {
+	args := struct {
+		Sheng string `json:"sheng"`
+		Place string `json:"place"`
+	}{}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		h.logger.Errorf("Failed to unmarshal weather query arguments: %v", err)
+		return "", err
+	}
+	// shane: construct the request data
+	data := fmt.Sprintf("id=10006512&key=512b69d6b44c1c59a1a698da8d3cb1a7&sheng=%s&place=%s", args.Sheng, args.Place)
+	request, err := http.NewRequest("POST", "https://cn.apihz.cn/api/tianqi/tqyb.php", bytes.NewBufferString(data))
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+
+	respBody, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var weatherResp WeatherResponse
+	if err := json.Unmarshal(respBody, &weatherResp); err != nil {
+		return "", fmt.Errorf("failed to unmarshal weather response: %v, content: %s", err, string(respBody))
+	}
+	// shane: construct the weather information string
+	weatherInfo := fmt.Sprintf("当前时间：%s,%s 的天气情况如下：温度为 %.1f 摄氏度，天气状况为 %s，风力为 %s，相对湿度为 %d%%。",
+		weatherResp.Uptime, weatherResp.Place, weatherResp.Temperature, weatherResp.Weather1, weatherResp.WindScale, weatherResp.Humidity)
+
+	reqBody := SFRequest{
+		Model: h.Model,
+		Messages: []SFMessage{
+			{Role: "system", Content: "Please use the following weather information to answer the user's question. Ensure your response is concise and clear. The weather details include precipitation, temperature, pressure, humidity, wind direction, wind speed, wind scale, feels-like temperature, location, weather conditions (such as light rain or moderate rain), update time, etc. You must reply in Chinese."},
+			{Role: "user", Content: userMsg},
+			{Role: "tool", Content: weatherInfo, ToolCallId: toolCallId},
+		},
+		MaxTokens: 512,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req, _ := http.NewRequestWithContext(h.ctx, "POST", h.Endpoint, bytes.NewReader(body))
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("authorization", "Bearer "+h.APIKey)
+	req.Header.Set("content-type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ = ioutil.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("status code: %d, body: %s", resp.StatusCode, string(respBody))
+	}
+
+	var sfResp SFResponse
+	if err := json.Unmarshal(respBody, &sfResp); err != nil {
+		return "", err
+	}
+	if len(sfResp.Choices) == 0 {
+		return "", fmt.Errorf("no choices in response")
+	}
+	return sfResp.Choices[0].Message.Content, nil
 }
 
 // shane: struct2string

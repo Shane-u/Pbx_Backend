@@ -26,6 +26,7 @@ type SiliconFlowHandler struct {
 	searchApiModel string
 	ctx            context.Context
 	logger         *logrus.Logger
+	history        []SFMessage
 }
 
 // SiliconFlowRJson shane: Response JSON structure for SiliconFlow
@@ -175,8 +176,57 @@ func (h *SiliconFlowHandler) Query(userMsg string) (string, error) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 
+	h.history = append(h.history, SFMessage{
+		Role:    "user",
+		Content: userMsg,
+	})
+
 	// shane: define the tools
 	tools := SFTools{
+		// {
+		// 	Type: "function",
+		// 	Function: struct {
+		// 		Description string      `json:"description"`
+		// 		Name        string      `json:"name"`
+		// 		Parameters  interface{} `json:"parameters"`
+		// 		Required    []string    `json:"required"`
+		// 	}{
+		// 		Description: "The function sends a query to the browser and returns relevant results based on the search terms provided. The model should avoid using this function if it already possesses the required information or can provide a confident answer without external data",
+		// 		Name:        "searchOnline",
+		// 		Parameters: QueryParameters{
+		// 			Query: struct {
+		// 				Description string `json:"description"`
+		// 				Type        string `json:"type"`
+		// 			}{
+		// 				Description: "What to search for",
+		// 				Type:        "string",
+		// 			},
+		// 		},
+		// 		Required: []string{"query"},
+		// 	},
+		// },
+		// {
+		// 	Type: "function",
+		// 	Function: struct {
+		// 		Description string      `json:"description"`
+		// 		Name        string      `json:"name"`
+		// 		Parameters  interface{} `json:"parameters"`
+		// 		Required    []string    `json:"required"`
+		// 	}{
+		// 		Description: "Generate an image based on a given prompt",
+		// 		Name:        "generateImage",
+		// 		Parameters: PromptParameters{
+		// 			Prompt: struct {
+		// 				Description string `json:"description"`
+		// 				Type        string `json:"type"`
+		// 			}{
+		// 				Description: "A text prompt describing the image to be generated",
+		// 				Type:        "string",
+		// 			},
+		// 		},
+		// 		Required: []string{"prompt"},
+		// 	},
+		// },
 		{
 			Type: "function",
 			Function: struct {
@@ -185,51 +235,7 @@ func (h *SiliconFlowHandler) Query(userMsg string) (string, error) {
 				Parameters  interface{} `json:"parameters"`
 				Required    []string    `json:"required"`
 			}{
-				Description: "The function sends a query to the browser and returns relevant results based on the search terms provided. The model should avoid using this function if it already possesses the required information or can provide a confident answer without external data",
-				Name:        "searchOnline",
-				Parameters: QueryParameters{
-					Query: struct {
-						Description string `json:"description"`
-						Type        string `json:"type"`
-					}{
-						Description: "What to search for",
-						Type:        "string",
-					},
-				},
-				Required: []string{"query"},
-			},
-		},
-		{
-			Type: "function",
-			Function: struct {
-				Description string      `json:"description"`
-				Name        string      `json:"name"`
-				Parameters  interface{} `json:"parameters"`
-				Required    []string    `json:"required"`
-			}{
-				Description: "Generate an image based on a given prompt",
-				Name:        "generateImage",
-				Parameters: PromptParameters{
-					Prompt: struct {
-						Description string `json:"description"`
-						Type        string `json:"type"`
-					}{
-						Description: "A text prompt describing the image to be generated",
-						Type:        "string",
-					},
-				},
-				Required: []string{"prompt"},
-			},
-		},
-		{
-			Type: "function",
-			Function: struct {
-				Description string      `json:"description"`
-				Name        string      `json:"name"`
-				Parameters  interface{} `json:"parameters"`
-				Required    []string    `json:"required"`
-			}{
-				Description: "查询指定地点的天气信息,需要剥离出省份信息放到sheng参数里面,并且需要剥离出地点的信息放到place参数里面",
+				Description: "查询指定地点的天气信息,地点必须是中文，不能是英文！需要剥离出省份信息放到sheng参数里面,并且需要剥离出地点的信息放到place参数里面",
 				Name:        "queryWeather",
 				Parameters: struct {
 					Sheng string `json:"sheng"`
@@ -245,7 +251,7 @@ func (h *SiliconFlowHandler) Query(userMsg string) (string, error) {
 
 	reqBody := SFRequest{
 		Model:     h.Model,
-		Messages:  []SFMessage{{Role: "user", Content: userMsg}},
+		Messages:  h.history,
 		MaxTokens: 512,
 		Stream:    false,
 		Tools:     tools,
@@ -276,6 +282,14 @@ func (h *SiliconFlowHandler) Query(userMsg string) (string, error) {
 	}
 	if len(sfResp.Choices) == 0 {
 		return "", fmt.Errorf("no choices in response")
+	}
+
+	if len(sfResp.Choices) > 0 {
+		assistantMsg := sfResp.Choices[0].Message
+		h.history = append(h.history, SFMessage{
+			Role:    "assistant",
+			Content: assistantMsg.Content,
+		})
 	}
 
 	// shane: Check if the response contains tool calls
@@ -327,11 +341,11 @@ func (h *SiliconFlowHandler) handleSearchOnline(arguments string, userMsg string
 	// shane:
 	reqBody := SFRequest{
 		Model: h.Model,
-		Messages: []SFMessage{
-			{Role: "system", Content: "Please provide the user's question and the specific search results, and I will directly use the search results to answer the question in English, summarizing naturally if there are multiple sources."},
-			{Role: "user", Content: userMsg},
-			{Role: "tool", Content: h.searchResultToString(searchResult), ToolCallId: toolCallId},
-		},
+		Messages: append(h.history,
+			SFMessage{
+				Role: "tool", Content: h.searchResultToString(searchResult), ToolCallId: toolCallId,
+			},
+		),
 		MaxTokens: 512,
 	}
 	body, _ := json.Marshal(reqBody)
@@ -358,6 +372,13 @@ func (h *SiliconFlowHandler) handleSearchOnline(arguments string, userMsg string
 	}
 	if len(sfResp.Choices) == 0 {
 		return "", fmt.Errorf("no choices in response")
+	}
+	// shane: append history
+	if len(sfResp.Choices) > 0 {
+		h.history = append(h.history, SFMessage{
+			Role:    "assistant",
+			Content: sfResp.Choices[0].Message.Content,
+		})
 	}
 	return sfResp.Choices[0].Message.Content, nil
 }
@@ -587,11 +608,9 @@ func (h *SiliconFlowHandler) handleQueryWeather(arguments string, userMsg string
 
 	reqBody := SFRequest{
 		Model: h.Model,
-		Messages: []SFMessage{
-			{Role: "system", Content: "Please use the following weather information to answer the user's question. Ensure your response is concise and clear. The weather details include precipitation, temperature, pressure, humidity, wind direction, wind speed, wind scale, feels-like temperature, location, weather conditions (such as light rain or moderate rain), update time, etc. You must reply in Chinese."},
-			{Role: "user", Content: userMsg},
-			{Role: "tool", Content: weatherInfo, ToolCallId: toolCallId},
-		},
+		Messages: append(h.history, SFMessage{
+			Role: "tool", Content: weatherInfo, ToolCallId: toolCallId,
+		}),
 		MaxTokens: 512,
 	}
 	body, _ := json.Marshal(reqBody)
@@ -619,6 +638,13 @@ func (h *SiliconFlowHandler) handleQueryWeather(arguments string, userMsg string
 	if len(sfResp.Choices) == 0 {
 		return "", fmt.Errorf("no choices in response")
 	}
+	// shane: append history
+	if len(sfResp.Choices) > 0 {
+		h.history = append(h.history, SFMessage{
+			Role:    "assistant",
+			Content: sfResp.Choices[0].Message.Content,
+		})
+	}
 	return sfResp.Choices[0].Message.Content, nil
 }
 
@@ -629,4 +655,10 @@ func (h *SiliconFlowHandler) searchResultToString(results []SearchResult) string
 		buf.WriteString(fmt.Sprintf("Title: %s\nContent: %s\nLink: %s\n\n", r.Title, r.Content, r.Link))
 	}
 	return buf.String()
+}
+
+func (h *SiliconFlowHandler) ResetHistory() {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.history = []SFMessage{}
 }

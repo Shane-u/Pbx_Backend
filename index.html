@@ -3,7 +3,7 @@
 
 <body>
     <button onclick="connectWebRTC()">建立语音连接</button>
-    <button onclick="hangupCall()" id="hangupButton" disabled>挂断通话</button>
+    <button onclick="hangupCall()" id="hangupButton">挂断通话</button>
     <div id="log"></div>
     <audio id="audio" autoplay></audio>
 
@@ -15,6 +15,8 @@
 
         ws.onopen = function () {
             log('WebSocket connected!');
+            // shane: hangup 清理上次对话
+            // hangupCallWithoutAnything();
         };
 
         ws.onmessage = function (event) {
@@ -45,6 +47,8 @@
                     }
                     log('Call has been hung up');
                     isConnected = false;
+                } else if (message.event === 'error') {
+                    // shane: 客户端超过15秒没有发送音频
                 }
             } catch (error) {
                 log('parse message failed: ' + error.message);
@@ -67,11 +71,12 @@
             log('WebSocket error: ' + error.message);
         };
 
+
         async function connectWebRTC() {
-            // if (isConnected) {
-            //     log('WebRTC already connected！');
-            //     return;
-            // }
+            if (isConnected) {
+                log('WebRTC already connected！');
+                return;
+            }
 
             log('Start to handle WebRTC Connection');
 
@@ -106,17 +111,6 @@
                     });
                 };
 
-                // shane: ICE 候选生成，发送到 Go 后端
-                peerConnection.onicecandidate = function (event) {
-                    if (event.candidate) {
-                        log('send ICE candidate to Go backend!');
-                        ws.send(JSON.stringify({
-                            event: 'candidate',
-                            candidate: event.candidate
-                        }));
-                    }
-                };
-
                 // shane: create SDP Offer and set local description
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
@@ -148,16 +142,6 @@
             }
         }
 
-        async function handleCandidate(candidate) {
-            try {
-                // shane: hanle ICE candidate from Go backend
-                await peerConnection.addIceCandidate(candidate);
-                log('had add ICE candidate');
-            } catch (error) {
-                log('handle ICE candidate failed: ' + error.message);
-            }
-        }
-
         // shane: 挂断通话处理函数
         function hangupCall() {
             if (isConnected) {
@@ -174,6 +158,20 @@
                 log('WebRTC connection is not established.');
             }
         }
+
+        window.addEventListener('beforeunload', function(e) {
+           if(isConnected) {
+                const hangupCommand = {
+                    command: "hangup",
+                    reason: "user_requested",
+                    initiator: "caller"
+                };
+                ws.send(JSON.stringify(hangupCommand));
+                e.preventDefault();
+                e.returnValue = '';
+                return "";
+           }
+        })
 
         // shane: handle log
         function log(text) {

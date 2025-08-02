@@ -3,8 +3,10 @@
 
 <body>
     <button onclick="connectWebRTC()">建立语音连接</button>
+    <button onclick="toggleMute()" id="muteButton" disabled>静音</button>
     <button onclick="hangupCall()" id="hangupButton">挂断通话</button>
     <div id="log"></div>
+    <div id="llmResponse"></div>
     <audio id="audio" autoplay></audio>
 
     <script>
@@ -12,6 +14,8 @@
         const ws = new WebSocket('ws://localhost:8081/ws2');
         let peerConnection = null;
         let isConnected = false;
+        let localStream = null;
+        let isMuted = false;
 
         ws.onopen = function () {
             log('WebSocket connected!');
@@ -27,18 +31,19 @@
                 if (message.event === 'answer') {
                     handleAnswer(message.sdp);
                     document.getElementById('hangupButton').disabled = false;
-                } else if (message.event === 'candidate') {
-                    handleCandidate(message.candidate);
                 } else if (message.event === 'trackStart') {
                     log('Remote media track has started');
                 } else if (message.event === 'asrDelta') {
                     log('ASR realtime recognition: ' + message.text);
                 } else if (message.event === 'asrFinal') {
                     log('ASR Final Result: ' + message.text);
-                } else if (message.event === 'llmResponse') {
-                    log('AI Response: ' + message.text);
-                    document.getElementById('llmResponse').textContent = message.text;
-                } else if (message.event === 'hangup') {
+                } else if (message.event === 'llmStream') {
+                    log('AI Stream: ' + message.text);
+                    updateLLMResponse(message.text, false); 
+                } else if (message.event === 'llmFinal') {
+                    log('AI Final Response: ' + message.text);
+                    updateLLMResponse(message.text, true);
+                }  else if (message.event === 'hangup') {
                     document.getElementById('hangupButton').disabled = true;
                     // shane: 清理资源
                     if (peerConnection) {
@@ -92,6 +97,8 @@
                     peerConnection.addTrack(track, stream);
                 });
                 log('Access and add to track!');
+
+                document.getElementById('muteButton').disabled = false;
 
                 // shane: 监听回调远程音频流
                 peerConnection.ontrack = function (event) {
@@ -168,7 +175,6 @@
                 };
                 ws.send(JSON.stringify(hangupCommand));
                 e.preventDefault();
-                e.returnValue = '';
                 return "";
            }
         })
@@ -180,6 +186,35 @@
             p.textContent = new Date().toLocaleTimeString() + ' - ' + text;
             logDiv.appendChild(p);
             logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        let currentStreamText = '';
+        function updateLLMResponse(text, isFinal) {
+            let responseElement = document.getElementById('llmResponse');
+            
+            if (!responseElement) {
+                responseElement = document.createElement('div');
+                responseElement.id = 'llmResponse';
+                document.body.appendChild(responseElement);
+            }
+            
+            if (isFinal) {
+                responseElement.textContent = text;
+                responseElement.className = 'completed';
+                currentStreamText = '';
+                log('AI conversation completed');
+            } else {
+                currentStreamText += text;
+                responseElement.textContent = currentStreamText;
+                responseElement.className = 'streaming';
+
+                if (text.includes('正在思考') || text.includes('请稍等')) {
+                    responseElement.classList.add('正在思考...');
+                }
+            }
+            
+            // shane: auto scroll
+            responseElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
     </script>
 </body>

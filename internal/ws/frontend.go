@@ -7,12 +7,11 @@ import (
 	"net/http"
 	"pbx_back_end"
 	"pbx_back_end/internal/handler"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/shenjinti/go711"
-	"github.com/shenjinti/go722"
 )
 
 // FrontendServer 管理前端WebSocket连接
@@ -28,6 +27,7 @@ type FrontendServer struct {
 	codec          string                      // shane: codec for audio stream
 	asrOption      *pbx_back_end.ASROption
 	ttsOption      *pbx_back_end.TTSOption
+	mu             sync.Mutex // shane: solve the concurrent write problem
 }
 
 func NewFrontendServer(llm *handler.LLMHandler, siliconFlowLLM *handler.SiliconFlowHandler, backendConn *websocket.Conn, backendServer *BackendServer, codec string, asrOption *pbx_back_end.ASROption, ttsOption *pbx_back_end.TTSOption) *FrontendServer {
@@ -110,22 +110,6 @@ func (s *FrontendServer) handleWebSocket2(w gin.ResponseWriter, r *http.Request)
 	done := make(chan struct{})
 	go s.ReceiveRealTimeMessage(conn, done) // shane: 启动接收实时消息的协程
 	<-done
-}
-
-// convertAudio shane: parse audio data and convert to g722 or pcmu
-func (s *FrontendServer) convertAudio(audioData []byte) ([]byte, error) {
-	if s.codec == "g722" {
-		encoder := go722.NewG722Encoder(go722.Rate64000, 0)
-		return encoder.Encode(audioData), nil
-	} else if s.codec == "pcmu" {
-		return go711.EncodePCMU(audioData)
-	} else if s.codec == "pcm" {
-		return audioData, nil
-	} else if s.codec == "wav" {
-		return audioData, nil
-	}
-
-	return audioData, nil
 }
 
 // ReceiveMessages shane: 接收前端发送的消息,没有返回值
@@ -276,18 +260,43 @@ func (s *FrontendServer) SendMessages(conn *websocket.Conn, msg []byte) {
 		return
 	}
 
-	// shane: 发送LLM处理后的消息到前端
-	//response, _, err := s.llm.Query("qwen-turbo", string(msg))
-	// shane: 发送SiliconFlowLLM处理后的消息到前端
-	response, err := s.siliconFlowLLM.Query(string(msg))
+	// shane: Stream LLM
+	ttsCallback := func(segment string, playID string, autoHangup bool) error {
+		streamEvent := map[string]interface{}{
+			"event":  "llmStream",
+			"text":   segment,
+			"playID": playID,
+			"final":  autoHangup,
+		}
+		eventBytes, _ := json.Marshal(streamEvent)
+
+		if err := conn.WriteMessage(websocket.TextMessage, eventBytes); err != nil {
+			logrus.Errorf("Failed to send stream segment: %v", err)
+			return err
+		} else {
+			logrus.Infof("Stream segment sent: %s", segment)
+		}
+		return nil
+	}
+
+	// shane: Stream Query
+	response, err := s.siliconFlowLLM.QueryStream(string(msg), ttsCallback)
 	if err != nil {
-		logrus.Error("LLM query failed:", err)
+		logrus.Error("LLM stream query failed:", err)
 		return
 	}
-	// shane: 发送回复到前端
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(response)); err != nil {
-		logrus.Error("sendMessage failed:", err)
+
+	// shane: send complete response
+	finalEvent := map[string]interface{}{
+		"event": "llmFinal",
+		"text":  response,
 	}
+	s.mu.Lock()
+	eventBytes, _ := json.Marshal(finalEvent)
+	if err := conn.WriteMessage(websocket.TextMessage, eventBytes); err != nil {
+		logrus.Error("Failed to send final response:", err)
+	}
+	s.mu.Unlock()
 }
 
 // receiveBackendMessages shane: 接收并打印后端发送的消息
@@ -324,43 +333,12 @@ func (s *FrontendServer) receiveBackendMessages() {
 				logrus.Infof("received ASR response: %s", event.Text)
 
 				// shane: use LLM to handle ASR result
-				if s.llm != nil {
-					logrus.Info("handle ASR result via LLM...")
-					//response, _, err := s.llm.Query("qwen-turbo", event.Text)
-					response, err := s.siliconFlowLLM.Query(event.Text)
-					if err != nil {
-						logrus.Error("LLM handle ASR result failed:", err)
+				if s.siliconFlowLLM != nil {
+					IsStreaming := true
+					if IsStreaming {
+						go s.handleASRWithStream(event.Text)
 					} else {
-						logrus.Infof("LLM response: %s", response)
-						if s.RealTimeConn != nil {
-							if err := s.RealTimeConn.WriteMessage(websocket.TextMessage, []byte(response)); err != nil {
-								logrus.Errorf("Failed to send LLM response to frontend: %v", err)
-								if websocket.IsCloseError(err, websocket.CloseGoingAway) {
-									s.RealTimeConn = nil
-								}
-							}
-						} else {
-							logrus.Error("RealTime conn is nil, cannot send LLM response")
-						}
-
-						// shane: send TTS command to Rust backend
-						ttsCmd := pbx_back_end.TtsCommand{
-							Command: "tts",
-							Text:    response,
-							Speaker: s.ttsOption.Speaker,
-							Option:  s.ttsOption,
-						}
-
-						cmdBytes, err := json.Marshal(ttsCmd)
-						if err != nil {
-							logrus.Error("generate TTS Command failed:", err)
-						} else {
-							if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
-								logrus.Error("send TTS command to Rust backend failed:", err)
-							} else {
-								logrus.Info("TTS command sent to Rust backend successfully")
-							}
-						}
+						go s.handleASRWithNormal(event.Text)
 					}
 				}
 			} else if event.Event == "asrDelta" {
@@ -379,13 +357,138 @@ func (s *FrontendServer) receiveBackendMessages() {
 
 		// shane: forward the message to the frontend
 		s.forwardRustMessageToFrontend(msg)
+
 	}
 
 	// log.Println("Stopped listening for backend messages") // shane: 自动重连监听
 }
 
+// handleASRWithStream shane: use stream LLM handle ASR result
+func (s *FrontendServer) handleASRWithStream(asrText string) {
+	logrus.Info("handle ASR result via streaming LLM...")
+
+	// shane: define TTS callback function
+	ttsCallback := func(segment string, playID string, autoHangup bool) error {
+		// shane: send TTS command to Rust backend
+		ttsCmd := pbx_back_end.TtsCommand{
+			Command:     "tts",
+			Text:        segment,
+			Speaker:     s.ttsOption.Speaker,
+			PlayID:      playID,
+			AutoHangup:  autoHangup,
+			Streaming:   true,
+			EndOfStream: false,
+			Option:      s.ttsOption,
+		}
+
+		cmdBytes, err := json.Marshal(ttsCmd)
+		if err != nil {
+			logrus.Error("generate TTS Command failed:", err)
+			return err
+		}
+
+		if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+			logrus.Error("send TTS command to Rust backend failed:", err)
+			return err
+		} else {
+			logrus.Infof("TTS segment sent to Rust backend: %s", segment)
+		}
+
+		// shane: send
+		s.mu.Lock()
+		if s.RealTimeConn != nil {
+			streamEvent := map[string]interface{}{
+				"event":  "llmStream",
+				"text":   segment,
+				"playID": playID,
+				"final":  autoHangup,
+			}
+			eventBytes, _ := json.Marshal(streamEvent)
+			if err := s.RealTimeConn.WriteMessage(websocket.TextMessage, eventBytes); err != nil {
+				logrus.Errorf("Failed to send stream segment to frontend: %v", err)
+			} else {
+				logrus.Infof("Stream segment sent to frontend: %s", segment)
+			}
+		}
+		s.mu.Unlock()
+
+		return nil
+	}
+
+	// shane: use streaming query
+	response, err := s.siliconFlowLLM.QueryStream(asrText, ttsCallback)
+	if err != nil {
+		logrus.Error("LLM handle ASR result failed:", err)
+	} else {
+		logrus.Infof("LLM stream response completed: %s", response)
+		// shane: send final llm response to frontend
+		s.mu.Lock()
+		if s.RealTimeConn != nil {
+			finalEvent := map[string]interface{}{
+				"event": "llmFinal",
+				"text":  response,
+			}
+			eventBytes, _ := json.Marshal(finalEvent)
+			if err := s.RealTimeConn.WriteMessage(websocket.TextMessage, eventBytes); err != nil {
+				logrus.Errorf("Failed to send final response to frontend: %v", err)
+				if websocket.IsCloseError(err, websocket.CloseGoingAway) {
+					s.RealTimeConn = nil
+				}
+			}
+		} else {
+			logrus.Error("RealTime conn is nil, cannot send LLM response")
+		}
+		s.mu.Unlock()
+	}
+}
+
+// handleASRWithNormal shane: use normal LLM handle asr result
+func (s *FrontendServer) handleASRWithNormal(asrText string) {
+	logrus.Info("handle ASR result via normal LLM...")
+
+	response, err := s.siliconFlowLLM.Query(asrText)
+	// response, _, err := s.llm.Query("qwen-turbo", event.Text)
+	if err != nil {
+		logrus.Error("LLM handle ASR result failed:", err)
+	} else {
+		logrus.Infof("LLM response: %s", response)
+		if s.RealTimeConn != nil {
+			if err := s.RealTimeConn.WriteMessage(websocket.TextMessage, []byte(response)); err != nil {
+				logrus.Errorf("Failed to send LLM response to frontend: %v", err)
+				if websocket.IsCloseError(err, websocket.CloseGoingAway) {
+					s.RealTimeConn = nil
+				}
+			}
+		} else {
+			logrus.Error("RealTime conn is nil, cannot send LLM response")
+		}
+
+		// shane: send TTS command to Rust backend
+		ttsCmd := pbx_back_end.TtsCommand{
+			Command: "tts",
+			Text:    response,
+			Speaker: s.ttsOption.Speaker,
+			Option:  s.ttsOption,
+		}
+
+		cmdBytes, err := json.Marshal(ttsCmd)
+		if err != nil {
+			logrus.Error("generate TTS Command failed:", err)
+		} else {
+			if err := s.backendConn.WriteMessage(websocket.TextMessage, cmdBytes); err != nil {
+				logrus.Error("send TTS command to Rust backend failed:", err)
+			} else {
+				logrus.Info("TTS command sent to Rust backend successfully")
+			}
+		}
+	}
+}
+
 // forwardRustMessageToFrontend shane: 转发后端消息给前端
 func (s *FrontendServer) forwardRustMessageToFrontend(msg []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.RealTimeConn != nil {
 		if err := s.RealTimeConn.WriteMessage(websocket.TextMessage, msg); err != nil {
 			logrus.Error("Failed to forward backend message to frontend:", err)

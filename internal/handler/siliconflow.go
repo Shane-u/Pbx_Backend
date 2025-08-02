@@ -12,7 +12,9 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -124,7 +126,15 @@ type PromptParameters struct {
 type RespData struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Id       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls,omitempty"`
 		} `json:"delta"`
 	} `json:"choices"`
 }
@@ -159,6 +169,66 @@ type WeatherResponse struct {
 	Jieqi               string  `json:"jieqi"`
 }
 
+// TextTransformRequest
+type TextTransformRequest struct {
+	Model string `json:"model"`
+	Input struct {
+		Text   string `json:"text"`
+		Prompt string `json:"prompt"`
+	} `json:"input"`
+	Parameters struct {
+		Steps            int    `json:"steps"`
+		N                int    `json:"n"`
+		FontName         string `json:"font_name,omitempty"`
+		TtfUrl           string `json:"ttf_url,omitempty"`
+		OutputImageRatio string `json:"output_image_ratio"`
+	} `json:"parameters"`
+}
+
+// TextTransformResponse
+type TextTransformResponse struct {
+	Output struct {
+		TaskId     string `json:"task_id"`
+		TaskStatus string `json:"task_status"`
+	} `json:"output"`
+	Usage struct {
+		ImageCount int `json:"image_count"`
+	} `json:"usage"`
+	RequestId string `json:"request_id"`
+}
+
+// TextTransformTaskQuery
+type TaskQueryResponse struct {
+	Output struct {
+		TaskId     string `json:"task_id"`
+		TaskStatus string `json:"task_status"`
+		Results    []struct {
+			SvgUrl string `json:"svg_url"`
+			PngUrl string `json:"png_url"`
+		} `json:"results"`
+	} `json:"output"`
+	Usage struct {
+		ImageCount int `json:"image_count"`
+	} `json:"usage"`
+	RequestId string `json:"request_id"`
+}
+
+// Ine: TextTransform parameters
+type TextTransformParameters struct {
+	Text struct {
+		Description string `json:"description"`
+		Type        string `json:"type"`
+	} `json:"text"`
+	Prompt struct {
+		Description string `json:"description"`
+		Type        string `json:"type"`
+	}
+	Style struct {
+		Description string `json:"description"`
+		Type        string `json:"type"`
+	} `json:"style"`
+}
+
 func NewSiliconFlowHandler(ctx context.Context, apiKey, endpoint, model string, logger *logrus.Logger, searchApiUrl string, searchApiKey string, searchApiModel string) *SiliconFlowHandler {
 	return &SiliconFlowHandler{
 		ctx:            ctx,
@@ -172,7 +242,7 @@ func NewSiliconFlowHandler(ctx context.Context, apiKey, endpoint, model string, 
 	}
 }
 
-func (h *SiliconFlowHandler) Query(userMsg string) (string, error) {
+func (h *SiliconFlowHandler) QueryStream(userMsg string, ttsCallback func(segment string, playID string, autoHangup bool) error) (string, error) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 
@@ -183,50 +253,6 @@ func (h *SiliconFlowHandler) Query(userMsg string) (string, error) {
 
 	// shane: define the tools
 	tools := SFTools{
-		// {
-		// 	Type: "function",
-		// 	Function: struct {
-		// 		Description string      `json:"description"`
-		// 		Name        string      `json:"name"`
-		// 		Parameters  interface{} `json:"parameters"`
-		// 		Required    []string    `json:"required"`
-		// 	}{
-		// 		Description: "The function sends a query to the browser and returns relevant results based on the search terms provided. The model should avoid using this function if it already possesses the required information or can provide a confident answer without external data",
-		// 		Name:        "searchOnline",
-		// 		Parameters: QueryParameters{
-		// 			Query: struct {
-		// 				Description string `json:"description"`
-		// 				Type        string `json:"type"`
-		// 			}{
-		// 				Description: "What to search for",
-		// 				Type:        "string",
-		// 			},
-		// 		},
-		// 		Required: []string{"query"},
-		// 	},
-		// },
-		// {
-		// 	Type: "function",
-		// 	Function: struct {
-		// 		Description string      `json:"description"`
-		// 		Name        string      `json:"name"`
-		// 		Parameters  interface{} `json:"parameters"`
-		// 		Required    []string    `json:"required"`
-		// 	}{
-		// 		Description: "Generate an image based on a given prompt",
-		// 		Name:        "generateImage",
-		// 		Parameters: PromptParameters{
-		// 			Prompt: struct {
-		// 				Description string `json:"description"`
-		// 				Type        string `json:"type"`
-		// 			}{
-		// 				Description: "A text prompt describing the image to be generated",
-		// 				Type:        "string",
-		// 			},
-		// 		},
-		// 		Required: []string{"prompt"},
-		// 	},
-		// },
 		{
 			Type: "function",
 			Function: struct {
@@ -245,6 +271,379 @@ func (h *SiliconFlowHandler) Query(userMsg string) (string, error) {
 					Place: "",
 				},
 				Required: []string{"sheng", "place"},
+			},
+		},
+		{
+			Type: "function",
+			Function: struct {
+				Description string      `json:"description"`
+				Name        string      `json:"name"`
+				Parameters  interface{} `json:"parameters"`
+				Required    []string    `json:"required"`
+			}{
+				Description: "The function sends a query to the browser and returns relevant results based on the search terms provided. The model should avoid using this function if it already possesses the required information or can provide a confident answer without external data",
+				Name:        "searchOnline",
+				Parameters: QueryParameters{
+					Query: struct {
+						Description string `json:"description"`
+						Type        string `json:"type"`
+					}{
+						Description: "What to search for",
+						Type:        "string",
+					},
+				},
+				Required: []string{"query"},
+			},
+		},
+		{
+			Type: "function",
+			Function: struct {
+				Description string      `json:"description"`
+				Name        string      `json:"name"`
+				Parameters  interface{} `json:"parameters"`
+				Required    []string    `json:"required"`
+			}{
+				Description: "Generate an image based on a given prompt",
+				Name:        "generateImage",
+				Parameters: PromptParameters{
+					Prompt: struct {
+						Description string `json:"description"`
+						Type        string `json:"type"`
+					}{
+						Description: "A text prompt describing the image to be generated",
+						Type:        "string",
+					},
+				},
+				Required: []string{"prompt"},
+			},
+		},
+		{
+			Type: "function",
+			Function: struct {
+				Description string      `json:"description"`
+				Name        string      `json:"name"`
+				Parameters  interface{} `json:"parameters"`
+				Required    []string    `json:"required"`
+			}{
+				Description: "对输入的文字进行艺术变形处理，支持多种变形样式如花体字、艺术字等，可以用于装饰性文字展示",
+				Name:        "transformText",
+				Parameters: TextTransformParameters{
+					Text: struct {
+						Description string `json:"description"`
+						Type        string `json:"type"`
+					}{
+						Description: "需要进行变形处理的文字内容",
+						Type:        "string",
+					},
+					Prompt: struct {
+						Description string `json:"description"`
+						Type        string `json:"type"`
+					}{
+						Description: "艺术字风格描述提示词",
+						Type:        "string",
+					},
+					Style: struct {
+						Description string `json:"description"`
+						Type        string `json:"type"`
+					}{
+						Description: "变形样式，如flower(花体)、art(艺术字)、gothic(哥特体)等",
+						Type:        "string",
+					},
+				},
+				Required: []string{"text"},
+			},
+		},
+	}
+
+	reqBody := SFRequest{
+		Model:       h.Model,
+		Messages:    h.history,
+		MaxTokens:   512,
+		Stream:      true, // Enable streaming
+		Temperature: 0.7,
+		Tools:       tools,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	// Generate unique playID
+	playID := fmt.Sprintf("sf-%s", uuid.New().String())
+	h.logger.WithField("playID", playID).Info("Starting SiliconFlow stream with playID")
+
+	req, _ := http.NewRequestWithContext(h.ctx, "POST", h.Endpoint, bytes.NewReader(body))
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("authorization", "Bearer "+h.APIKey)
+	req.Header.Set("content-type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("status code: %d, body: %s", resp.StatusCode, string(respBody))
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	var buffer string
+	fullResponse := ""
+	var shouldHangup bool
+	// shane: tooCallsMap
+	toolCallsMap := make(map[string]struct {
+		Id       string
+		Type     string
+		Function struct {
+			Name      string
+			Arguments string
+		}
+	})
+	// shane: record the order
+	var toolCallOrder []string
+
+	// Regular expression to detect punctuation
+	punctuationRegex := regexp.MustCompile(`([.,;:!?，。！？；：])\s*`)
+
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return "", fmt.Errorf("error reading stream: %w", err)
+		}
+
+		lineStr := strings.TrimSpace(string(line))
+		if lineStr == "" || !strings.HasPrefix(lineStr, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(lineStr, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var respData RespData
+		if err := json.Unmarshal([]byte(data), &respData); err != nil {
+			continue
+		}
+
+		// Process content if available
+		if len(respData.Choices) > 0 {
+			choice := respData.Choices[0]
+			// shane: process content
+			if choice.Delta.Content != "" {
+				content := choice.Delta.Content
+				buffer += content
+				fullResponse += content
+
+				// Check for punctuation in the buffer
+				matches := punctuationRegex.FindAllStringSubmatchIndex(buffer, -1)
+				if len(matches) > 0 {
+					lastIdx := 0
+					for _, match := range matches {
+						segment := buffer[lastIdx:match[1]]
+						if segment != "" {
+							if err := ttsCallback(segment, playID, false); err != nil {
+								h.logger.WithError(err).Error("Failed to send TTS segment")
+							}
+						}
+						lastIdx = match[1]
+					}
+					if lastIdx < len(buffer) {
+						buffer = buffer[lastIdx:]
+					} else {
+						buffer = ""
+					}
+				}
+			}
+
+			// shane: construct tool calls
+			if len(choice.Delta.ToolCalls) > 0 {
+				for _, tc := range choice.Delta.ToolCalls {
+					if tc.Id != "" {
+						if tool, ok := toolCallsMap[tc.Id]; ok {
+							if tc.Function.Name != "" {
+								tool.Function.Name = tc.Function.Name
+							}
+							if tc.Function.Arguments != "" {
+								tool.Function.Arguments += tc.Function.Arguments
+							}
+							toolCallsMap[tc.Id] = tool
+						} else {
+							toolCallsMap[tc.Id] = struct {
+								Id       string
+								Type     string
+								Function struct {
+									Name      string
+									Arguments string
+								}
+							}{
+								Id:   tc.Id,
+								Type: tc.Type,
+								Function: struct {
+									Name      string
+									Arguments string
+								}{
+									Name:      tc.Function.Name,
+									Arguments: tc.Function.Arguments,
+								},
+							}
+							toolCallOrder = append(toolCallOrder, tc.Id)
+						}
+					} else {
+						if tc.Function.Arguments != "" && len(toolCallOrder) > 0 {
+							lastToolId := toolCallOrder[len(toolCallOrder)-1]
+							if tool, ok := toolCallsMap[lastToolId]; ok {
+								tool.Function.Arguments += tc.Function.Arguments
+								toolCallsMap[lastToolId] = tool
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// shane: Send any remaining text in the buffer
+	if err := ttsCallback(buffer, playID, shouldHangup); err != nil {
+		h.logger.WithError(err).Error("Failed to send final TTS segment")
+	}
+
+	// shane: Add assistant's response to history
+	h.history = append(h.history, SFMessage{
+		Role:    "assistant",
+		Content: fullResponse,
+	})
+
+	// shane:
+	for _, toolCall := range toolCallsMap {
+		if toolCall.Id != "" && toolCall.Function.Name != "" && toolCall.Function.Arguments != "" {
+			thinkingMsg := "正在思考，请稍等片刻"
+			if err := ttsCallback(thinkingMsg, playID, false); err != nil {
+				h.logger.WithError(err).Error("Failed to send thinking TTS")
+			}
+
+			// shane: 异步
+			go func(tc struct {
+				Id       string
+				Type     string
+				Function struct {
+					Name      string
+					Arguments string
+				}
+			}) {
+				var result string
+				var err error
+
+				switch tc.Function.Name {
+				case "queryWeather":
+					h.logger.Info("[Handling queryWeather tool call in stream]")
+					result, err = h.handleQueryWeather(tc.Function.Arguments, userMsg, tc.Id)
+				case "searchOnline":
+					h.logger.Info("[Handling searchOnline tool call in stream]")
+					result, err = h.handleSearchOnline(tc.Function.Arguments, userMsg, tc.Id)
+				case "generateImage":
+					h.logger.Info("[Handling generateImage tool call in stream]")
+					result, err = h.handleGenerateImage(tc.Function.Arguments)
+				case "transformText":
+					logrus.Info("[Handling transformText tool call]")
+					result, err = h.handleTransformText(tc.Function.Arguments, userMsg, tc.Id)
+				default:
+					err = fmt.Errorf("unknown function: %s", tc.Function.Name)
+				}
+
+				if err != nil {
+					h.logger.WithError(err).Error("Tool call failed")
+					ttsCallback("查询失败，请稍后重试", playID, false)
+				} else {
+					ttsCallback(result, playID, false)
+				}
+			}(toolCall)
+		}
+	}
+
+	h.logger.WithFields(logrus.Fields{
+		"responseLength": len(fullResponse),
+		"hangup":         shouldHangup,
+	}).Info("SiliconFlow stream completed")
+
+	return fullResponse, nil
+}
+
+func (h *SiliconFlowHandler) Query(userMsg string) (string, error) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+
+	h.history = append(h.history, SFMessage{
+		Role:    "user",
+		Content: userMsg,
+	})
+
+	// shane: define the tools
+	tools := SFTools{
+		{
+			Type: "function",
+			Function: struct {
+				Description string      `json:"description"`
+				Name        string      `json:"name"`
+				Parameters  interface{} `json:"parameters"`
+				Required    []string    `json:"required"`
+			}{
+				Description: "查询指定地点的天气信息,地点必须是中文，不能是英文！需要剥离出省份信息放到sheng参数里面,并且需要剥离出地点的信息放到place参数里面",
+				Name:        "queryWeather",
+				Parameters: struct {
+					Sheng string `json:"sheng"`
+					Place string `json:"place"`
+				}{
+					Sheng: "",
+					Place: "",
+				},
+				Required: []string{"sheng", "place"},
+			},
+		},
+		{
+			Type: "function",
+			Function: struct {
+				Description string      `json:"description"`
+				Name        string      `json:"name"`
+				Parameters  interface{} `json:"parameters"`
+				Required    []string    `json:"required"`
+			}{
+				Description: "The function sends a query to the browser and returns relevant results based on the search terms provided. The model should avoid using this function if it already possesses the required information or can provide a confident answer without external data",
+				Name:        "searchOnline",
+				Parameters: QueryParameters{
+					Query: struct {
+						Description string `json:"description"`
+						Type        string `json:"type"`
+					}{
+						Description: "What to search for",
+						Type:        "string",
+					},
+				},
+				Required: []string{"query"},
+			},
+		},
+		{
+			Type: "function",
+			Function: struct {
+				Description string      `json:"description"`
+				Name        string      `json:"name"`
+				Parameters  interface{} `json:"parameters"`
+				Required    []string    `json:"required"`
+			}{
+				Description: "Generate an image based on a given prompt",
+				Name:        "generateImage",
+				Parameters: PromptParameters{
+					Prompt: struct {
+						Description string `json:"description"`
+						Type        string `json:"type"`
+					}{
+						Description: "A text prompt describing the image to be generated",
+						Type:        "string",
+					},
+				},
+				Required: []string{"prompt"},
 			},
 		},
 	}
@@ -329,58 +728,79 @@ func (h *SiliconFlowHandler) handleSearchOnline(arguments string, userMsg string
 		h.logger.Errorf("Failed to unmarshal search online arguments: %v", err)
 		return "", err
 	}
-	searchOnline, err := h.SearchOnline(argumentsJson.Query)
-	if err != nil {
-		h.logger.Errorf("Failed to search online arguments: %v", err)
-		return "", err
+	Chan := make(chan struct {
+		result SearchOnlineStruct
+		err    error
+	}, 1)
+	// shane: 优化为协程
+	go func() {
+		result, err := h.SearchOnline(argumentsJson.Query)
+		Chan <- struct {
+			result SearchOnlineStruct
+			err    error
+		}{result, err}
+	}()
+	// shane: wait for the search result
+	searchResp := <-Chan
+	if searchResp.err != nil {
+		h.logger.Errorf("Failed to search online arguments: %v", searchResp.err)
+		return "", searchResp.err
 	}
+
+	searchOnline := searchResp.result
 	if len(searchOnline.Choices) == 0 || len(searchOnline.Choices[0].Message.ToolCalls) == 0 {
 		return "", fmt.Errorf("no search results found")
 	}
 	searchResult := searchOnline.Choices[0].Message.ToolCalls[0].SearchResult
+
+	return h.searchResultToString(searchResult), nil
 	// shane:
-	reqBody := SFRequest{
-		Model: h.Model,
-		Messages: append(h.history,
-			SFMessage{
-				Role: "tool", Content: h.searchResultToString(searchResult), ToolCallId: toolCallId,
-			},
-		),
-		MaxTokens: 512,
-	}
-	body, _ := json.Marshal(reqBody)
+	// h.mutex.Lock()
+	// reqBody := SFRequest{
+	// 	Model: h.Model,
+	// 	Messages: append(h.history,
+	// 		SFMessage{
+	// 			Role: "tool", Content: h.searchResultToString(searchResult), ToolCallId: toolCallId,
+	// 		},
+	// 	),
+	// 	MaxTokens: 512,
+	// }
+	// h.mutex.Unlock()
+	// body, _ := json.Marshal(reqBody)
 
-	req, _ := http.NewRequestWithContext(h.ctx, "POST", h.Endpoint, bytes.NewReader(body))
-	req.Header.Set("accept", "application/json")
-	req.Header.Set("authorization", "Bearer "+h.APIKey)
-	req.Header.Set("content-type", "application/json")
+	// req, _ := http.NewRequestWithContext(h.ctx, "POST", h.Endpoint, bytes.NewReader(body))
+	// req.Header.Set("accept", "application/json")
+	// req.Header.Set("authorization", "Bearer "+h.APIKey)
+	// req.Header.Set("content-type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	respBody, _ := ioutil.ReadAll(resp.Body)
+	// resp, err := http.DefaultClient.Do(req)
+	// if err != nil {
+	// 	return "", err
+	// }
+	// defer resp.Body.Close()
+	// respBody, _ := ioutil.ReadAll(resp.Body)
 
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("status code: %d, body: %s", resp.StatusCode, string(respBody))
-	}
+	// if resp.StatusCode != 200 {
+	// 	return "", fmt.Errorf("status code: %d, body: %s", resp.StatusCode, string(respBody))
+	// }
 
-	var sfResp SFResponse
-	if err := json.Unmarshal(respBody, &sfResp); err != nil {
-		return "", err
-	}
-	if len(sfResp.Choices) == 0 {
-		return "", fmt.Errorf("no choices in response")
-	}
-	// shane: append history
-	if len(sfResp.Choices) > 0 {
-		h.history = append(h.history, SFMessage{
-			Role:    "assistant",
-			Content: sfResp.Choices[0].Message.Content,
-		})
-	}
-	return sfResp.Choices[0].Message.Content, nil
+	// var sfResp SFResponse
+	// if err := json.Unmarshal(respBody, &sfResp); err != nil {
+	// 	return "", err
+	// }
+	// if len(sfResp.Choices) == 0 {
+	// 	return "", fmt.Errorf("no choices in response")
+	// }
+	// // shane: append history
+	// h.mutex.Lock()
+	// if len(sfResp.Choices) > 0 {
+	// 	h.history = append(h.history, SFMessage{
+	// 		Role:    "assistant",
+	// 		Content: sfResp.Choices[0].Message.Content,
+	// 	})
+	// }
+	// h.mutex.Unlock()
+	// return sfResp.Choices[0].Message.Content, nil
 }
 
 func (h *SiliconFlowHandler) handleGenerateImage(arguments string) (string, error) {
@@ -496,7 +916,7 @@ func (h *SiliconFlowHandler) SearchOnline(query string) (SearchOnlineStruct, err
 									Id: "search_result",
 									SearchResult: []SearchResult{{
 										Title:   "搜索结果原始内容",
-										Content: fmt.Sprintf("搜索结果原始内容: %s", cleanStr),
+										Content: fmt.Sprintf("%s", cleanStr),
 										Link:    "",
 									}},
 								},
@@ -578,74 +998,367 @@ func (h *SiliconFlowHandler) handleQueryWeather(arguments string, userMsg string
 		h.logger.Errorf("Failed to unmarshal weather query arguments: %v", err)
 		return "", err
 	}
-	// shane: construct the request data
-	data := fmt.Sprintf("id=10006512&key=512b69d6b44c1c59a1a698da8d3cb1a7&sheng=%s&place=%s", args.Sheng, args.Place)
-	request, err := http.NewRequest("POST", "https://cn.apihz.cn/api/tianqi/tqyb.php", bytes.NewBufferString(data))
-	if err != nil {
+	Chan := make(chan struct {
+		response WeatherResponse
+		err      error
+	}, 1)
+	// shane: 优化为协程
+	go func() {
+		// shane: construct the request data
+		data := fmt.Sprintf("id=10006512&key=512b69d6b44c1c59a1a698da8d3cb1a7&sheng=%s&place=%s", args.Sheng, args.Place)
+		request, err := http.NewRequest("POST", "https://cn.apihz.cn/api/tianqi/tqyb.php", bytes.NewBufferString(data))
+		if err != nil {
+			Chan <- struct {
+				response WeatherResponse
+				err      error
+			}{WeatherResponse{}, err}
+			return
+		}
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		client := &http.Client{}
+		response, err := client.Do(request)
+		if err != nil {
+			Chan <- struct {
+				response WeatherResponse
+				err      error
+			}{WeatherResponse{}, err}
+			return
+		}
+		defer response.Body.Close()
+
+		respBody, err := ioutil.ReadAll(response.Body)
+		if err != nil {
+			Chan <- struct {
+				response WeatherResponse
+				err      error
+			}{WeatherResponse{}, err}
+			return
+		}
+
+		var weatherResp WeatherResponse
+		if err := json.Unmarshal(respBody, &weatherResp); err != nil {
+			Chan <- struct {
+				response WeatherResponse
+				err      error
+			}{WeatherResponse{}, fmt.Errorf("failed to unmarshal weather response: %v, content: %s", err, string(respBody))}
+			return
+		}
+
+		// shane: send weatherResponse to chan
+		Chan <- struct {
+			response WeatherResponse
+			err      error
+		}{weatherResp, nil}
+	}()
+	// shane: construct the weather information string
+	weatherResp := <-Chan
+	weatherInfo := fmt.Sprintf("当前时间：%s,%s 的天气情况如下：温度为 %.1f 摄氏度，天气状况为 %s，风力为 %s，相对湿度为 %d%%。",
+		weatherResp.response.Uptime, weatherResp.response.Place, weatherResp.response.Temperature, weatherResp.response.Weather1, weatherResp.response.WindScale, weatherResp.response.Humidity)
+
+	return weatherInfo, nil
+
+	//h.mutex.Lock()
+	//reqBody := SFRequest{
+	//	Model: h.Model,
+	//	Messages: append(h.history, SFMessage{
+	//		Role: "tool", Content: weatherInfo, ToolCallId: toolCallId,
+	//	}),
+	//	MaxTokens: 512,
+	//}
+	//h.mutex.Unlock()
+	//body, _ := json.Marshal(reqBody)
+	//
+	//req, _ := http.NewRequestWithContext(h.ctx, "POST", h.Endpoint, bytes.NewReader(body))
+	//req.Header.Set("accept", "application/json")
+	//req.Header.Set("authorization", "Bearer "+h.APIKey)
+	//req.Header.Set("content-type", "application/json")
+	//
+	//resp, err := http.DefaultClient.Do(req)
+	//if err != nil {
+	//	return "", err
+	//}
+	//defer resp.Body.Close()
+	//respBody, _ := ioutil.ReadAll(resp.Body)
+	//
+	//if resp.StatusCode != 200 {
+	//	return "", fmt.Errorf("status code: %d, body: %s", resp.StatusCode, string(respBody))
+	//}
+	//
+	//var sfResp SFResponse
+	//if err := json.Unmarshal(respBody, &sfResp); err != nil {
+	//	return "", err
+	//}
+	//if len(sfResp.Choices) == 0 {
+	//	return "", fmt.Errorf("no choices in response")
+	//}
+	//// shane: append history
+	//h.mutex.Lock()
+	//if len(sfResp.Choices) > 0 {
+	//	h.history = append(h.history, SFMessage{
+	//		Role:    "assistant",
+	//		Content: sfResp.Choices[0].Message.Content,
+	//	})
+	//}
+	//h.mutex.Unlock()
+	//return sfResp.Choices[0].Message.Content, nil
+}
+
+// TextTransform
+func (h *SiliconFlowHandler) handleTransformText(arguments string, userMsg string, toolCallId string) (string, error) {
+	args := struct {
+		Text   string `json:"text"`
+		Prompt string `json:"prompt"`
+		Style  string `json:"style"`
+	}{}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		h.logger.Errorf("Failed to unmarshal transform text arguments: %v", err)
 		return "", err
 	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	if args.Prompt == "" {
+		return "", fmt.Errorf("prompt is required and cannot be empty")
+	}
+
+	// Ine: Constructing the request body
+	transformReq := TextTransformRequest{
+		Model: "wordart-semantic",
+		Input: struct {
+			Text   string `json:"text"`
+			Prompt string `json:"prompt"`
+		}{
+			Text:   args.Text,
+			Prompt: h.getStylePrompt(args.Prompt),
+		},
+		Parameters: struct {
+			Steps            int    `json:"steps"`
+			N                int    `json:"n"`
+			FontName         string `json:"font_name,omitempty"`
+			TtfUrl           string `json:"ttf_url,omitempty"`
+			OutputImageRatio string `json:"output_image_ratio"`
+		}{
+			Steps:            60,
+			N:                2,
+			OutputImageRatio: "1280x720",
+			FontName:         h.getFontName(args.Style),
+			TtfUrl:           h.getTtfUrl(args.Style),
+		},
+	}
+
+	marshal, err := json.Marshal(transformReq)
+	if err != nil {
+		h.logger.Errorf("Failed to marshal transform text request: %v", err)
+		return "", err
+	}
+
+	// Ine: Creating HTTP Requests
+	request, err := http.NewRequest("POST", "https://dashscope.aliyuncs.com/api/v1/services/aigc/wordart/semantic", bytes.NewReader(marshal))
+	if err != nil {
+		h.logger.Errorf("Failed to create transform text request: %v", err)
+		return "", err
+	}
+
+	request.Header.Set("X-DashScope-Async", "enable")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Authorization", "Bearer sk-2fc7c45d76494b279e4e029536616140")
 
 	client := &http.Client{}
 	response, err := client.Do(request)
 	if err != nil {
+		h.logger.Errorf("Failed to send transform text request: %v", err)
 		return "", err
 	}
 	defer response.Body.Close()
 
-	respBody, err := ioutil.ReadAll(response.Body)
+	resp, err := ioutil.ReadAll(response.Body)
 	if err != nil {
+		h.logger.Errorf("Failed to read transform text response: %v", err)
 		return "", err
 	}
 
-	var weatherResp WeatherResponse
-	if err := json.Unmarshal(respBody, &weatherResp); err != nil {
-		return "", fmt.Errorf("failed to unmarshal weather response: %v, content: %s", err, string(respBody))
+	h.logger.Infof("Transform text API response: %s", string(resp))
+
+	if response.StatusCode != 200 {
+		h.logger.Errorf("Transform text API returned status code: %d, body: %s", response.StatusCode, string(resp))
+		return "", fmt.Errorf("transform text API error: status code %d, body: %s", response.StatusCode, string(resp))
 	}
-	// shane: construct the weather information string
-	weatherInfo := fmt.Sprintf("当前时间：%s,%s 的天气情况如下：温度为 %.1f 摄氏度，天气状况为 %s，风力为 %s，相对湿度为 %d%%。",
-		weatherResp.Uptime, weatherResp.Place, weatherResp.Temperature, weatherResp.Weather1, weatherResp.WindScale, weatherResp.Humidity)
 
-	reqBody := SFRequest{
-		Model: h.Model,
-		Messages: append(h.history, SFMessage{
-			Role: "tool", Content: weatherInfo, ToolCallId: toolCallId,
-		}),
-		MaxTokens: 512,
+	var TFResponse TextTransformResponse
+	if err := json.Unmarshal(resp, &TFResponse); err != nil {
+		h.logger.Errorf("Failed to unmarshal transform text response: %v, content: %s", err, string(resp))
+		return "", fmt.Errorf("failed to unmarshal transform text response: %v", err)
 	}
-	body, _ := json.Marshal(reqBody)
 
-	req, _ := http.NewRequestWithContext(h.ctx, "POST", h.Endpoint, bytes.NewReader(body))
-	req.Header.Set("accept", "application/json")
-	req.Header.Set("authorization", "Bearer "+h.APIKey)
-	req.Header.Set("content-type", "application/json")
+	// Ine: Get Task ID
+	taskId := TFResponse.Output.TaskId
+	if taskId == "" {
+		return "", fmt.Errorf("no task_id returned from API")
+	}
 
-	resp, err := http.DefaultClient.Do(req)
+	TFResult, err := h.queryTaskResult(taskId)
 	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	respBody, _ = ioutil.ReadAll(resp.Body)
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("status code: %d, body: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("failed to query task result: %v", err)
 	}
 
-	var sfResp SFResponse
-	if err := json.Unmarshal(respBody, &sfResp); err != nil {
-		return "", err
+	return TFResult, nil
+
+	// // Ine: Calling LLM to process results
+	// reqBody := SFRequest{
+	// 	Model: h.Model,
+	// 	Messages: append(h.history, SFMessage{
+	// 		Role:       "tool",
+	// 		Content:    TFResult,
+	// 		ToolCallId: toolCallId,
+	// 	}),
+	// 	MaxTokens: 512,
+	// }
+
+	// body, _ := json.Marshal(reqBody)
+
+	// // Ine: Sending LLM requests
+	// req, _ := http.NewRequestWithContext(h.ctx, "POST", h.Endpoint, bytes.NewReader(body))
+	// req.Header.Set("accept", "application/json")
+	// req.Header.Set("authorization", "Bearer "+h.APIKey)
+	// req.Header.Set("content-type", "application/json")
+
+	// llmResp, err := http.DefaultClient.Do(req)
+	// if err != nil {
+	// 	return "", err
+	// }
+	// defer llmResp.Body.Close()
+
+	// llmRespBody, _ := ioutil.ReadAll(llmResp.Body)
+
+	// if llmResp.StatusCode != 200 {
+	// 	return "", fmt.Errorf("status code: %d, body: %s", llmResp.StatusCode, string(llmRespBody))
+	// }
+
+	// var sfResp SFResponse
+	// if err := json.Unmarshal(llmRespBody, &sfResp); err != nil {
+	// 	return "", err
+	// }
+	// if len(sfResp.Choices) == 0 {
+	// 	return "", fmt.Errorf("no choices in response")
+	// }
+
+	// // Ine: Adding to history
+	// if len(sfResp.Choices) > 0 {
+	// 	h.history = append(h.history, SFMessage{
+	// 		Role:    "assistant",
+	// 		Content: sfResp.Choices[0].Message.Content,
+	// 	})
+	// }
+
+	// return sfResp.Choices[0].Message.Content, nil
+}
+
+// Ine: Added a method to query task results
+func (h *SiliconFlowHandler) queryTaskResult(taskId string) (string, error) {
+	queryUrl := fmt.Sprintf("https://dashscope.aliyuncs.com/api/v1/tasks/%s", taskId)
+
+	// Ine: Polling query
+	maxAttempts := 30
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Create a query request
+		request, err := http.NewRequest("GET", queryUrl, nil)
+		if err != nil {
+			return "", err
+		}
+
+		request.Header.Set("Authorization", "Bearer sk-2fc7c45d76494b279e4e029536616140")
+
+		client := &http.Client{}
+		response, err := client.Do(request)
+		if err != nil {
+			return "", err
+		}
+
+		resp, err := ioutil.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil {
+			return "", err
+		}
+
+		if response.StatusCode != 200 {
+			return "", fmt.Errorf("query task API error: status code %d, body: %s", response.StatusCode, string(resp))
+		}
+
+		var queryResp TaskQueryResponse
+		if err := json.Unmarshal(resp, &queryResp); err != nil {
+			return "", fmt.Errorf("failed to unmarshal query response: %v", err)
+		}
+
+		h.logger.Infof("Task %s status: %s", taskId, queryResp.Output.TaskStatus)
+
+		switch queryResp.Output.TaskStatus {
+		case "SUCCEEDED":
+			// resultStr := fmt.Sprintf("艺术字生成成功！生成了%d张图片：", len(queryResp.Output.Results))
+			// for _, result := range queryResp.Output.Results {
+			// 	resultStr += fmt.Sprintf("%s", result.PngUrl)
+			// }
+			resultStr := fmt.Sprintf("![艺术字](%s)", queryResp.Output.Results[0].PngUrl)
+			return resultStr, nil
+		case "FAILED":
+			return "", fmt.Errorf("task failed")
+		case "PENDING", "RUNNING":
+			// The task is still being processed. Please wait for 10 seconds and try again.
+			time.Sleep(10 * time.Second)
+			continue
+		default:
+			return "", fmt.Errorf("unknown task status: %s", queryResp.Output.TaskStatus)
+		}
 	}
-	if len(sfResp.Choices) == 0 {
-		return "", fmt.Errorf("no choices in response")
+
+	return "", fmt.Errorf("task timeout after %d attempts", maxAttempts)
+}
+
+// Ine: Add prompt word processing
+func (h *SiliconFlowHandler) getStylePrompt(userPrompt string) string {
+	return userPrompt
+}
+
+// Ine: Font-Style
+func (h *SiliconFlowHandler) getFontName(style string) string {
+	// Preset
+	fontMap := map[string]string{
+		"dongfangdakai":  "dongfangdakai",    // 阿里妈妈东方大楷
+		"puhuiti":        "puhuiti_m",        // 阿里巴巴普惠体
+		"shuheiti":       "shuheiti",         // 阿里妈妈数黑体
+		"jinbu":          "jinbu1",           // 钉钉进步体
+		"kuhei":          "kuheti1",          // 站酷酷黑体
+		"kuailei":        "kuailei1",         // 站酷快乐体
+		"wenyiti":        "wenyiti1",         // 站酷文艺体
+		"logoti":         "logoti",           // 站酷小薇LOGO体
+		"cangeryuyangti": "cangeryuyangti_m", // 站酷仓耳渔阳体
+		"siyuansongti":   "siyuansongti_b",   // 思源宋体
+		"siyuanheiti":    "siyuanheiti_m",    // 思源黑体
+		"fangzhengkaiti": "fangzhengkaiti",   // 方正楷体
+		"flower":         "dongfangdakai",    // 花体样式默认使用东方大楷
+		"art":            "puhuiti_m",        // 艺术字样式默认使用普惠体
+		"gothic":         "siyuanheiti_m",    // 哥特样式默认使用思源黑体
+		"modern":         "siyuansongti_b",   // 现代样式默认使用思源宋体
 	}
-	// shane: append history
-	if len(sfResp.Choices) > 0 {
-		h.history = append(h.history, SFMessage{
-			Role:    "assistant",
-			Content: sfResp.Choices[0].Message.Content,
-		})
+
+	if fontName, exists := fontMap[style]; exists {
+		return fontName
 	}
-	return sfResp.Choices[0].Message.Content, nil
+	return "dongfangdakai" // 默认使用东方大楷
+}
+
+// Ine: URL of the custom font TTF file
+func (h *SiliconFlowHandler) getTtfUrl(style string) string {
+	// Ine：ttf_url & font_name cannot be used at the same time
+	customFontMap := map[string]string{
+		"custom_font1": "https://example.com/fonts/custom1.ttf",
+		"custom_font2": "https://example.com/fonts/custom2.ttf",
+		// Add more...
+	}
+
+	if url, exists := customFontMap[style]; exists {
+		return url
+	}
+	return "" // 大部分情况下使用预设字体，返回空字符串
 }
 
 // shane: struct2string
